@@ -5,3 +5,7 @@ edition = "2021"
 authors = ["Mark Drobnak <mark.drobnak@gmail>"]
 
 [dependencies]
+ctru-rs = { path = "ctru-rs/ctru-rs" }
+
+[patch.crates-io]
+libc = { git = "https://github.com/Meziu/libc.git" }
