@@ -1,0 +1,3 @@
+[submodule "ctru-rs"]
+	path = ctru-rs
+	url = git@github.com:AzureMarker/ctru-rs.git
