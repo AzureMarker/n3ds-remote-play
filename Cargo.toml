@@ -1,0 +1,7 @@
+[package]
+name = "n3ds-controller"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mark Drobnak <mark.drobnak@gmail>"]
+
+[dependencies]
