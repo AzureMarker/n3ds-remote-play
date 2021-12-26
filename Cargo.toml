@@ -2,7 +2,8 @@
 name = "n3ds-controller"
 version = "0.1.0"
 edition = "2021"
-authors = ["Mark Drobnak <mark.drobnak@gmail>"]
+authors = ["Mark Drobnak <mark.drobnak@gmail.com>"]
+description = "Use the 3DS as a controller for PC games"
 
 [dependencies]
 ctru-rs = { path = "ctru-rs/ctru-rs" }
