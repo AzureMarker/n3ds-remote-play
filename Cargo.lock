@@ -34,7 +34,7 @@ source = "git+https://github.com/Meziu/libc.git#6761f3c45f3958359788444f8fee7fe3
 [[package]]
 name = "linker-fix-3ds"
 version = "0.1.0"
-source = "git+https://github.com/AzureMarker/rust-linker-fix-3ds.git#818f3e6a2bb6156334f3078918719444122fe2ed"
+source = "git+https://github.com/Meziu/rust-linker-fix-3ds.git#6bb2dbde749901b2fb4c35071c0e0fecb9feb237"
 dependencies = [
  "libc",
 ]
