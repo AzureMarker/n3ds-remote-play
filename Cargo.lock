@@ -23,12 +23,21 @@ name = "ctru-sys"
 version = "0.4.0"
 dependencies = [
  "libc",
+ "linker-fix-3ds",
 ]
 
 [[package]]
 name = "libc"
 version = "0.2.105"
-source = "git+https://github.com/Meziu/libc.git#8409849a11381bd4861faede6b7943da30d4b30c"
+source = "git+https://github.com/Meziu/libc.git#6761f3c45f3958359788444f8fee7fe3560316a2"
+
+[[package]]
+name = "linker-fix-3ds"
+version = "0.1.0"
+source = "git+https://github.com/AzureMarker/rust-linker-fix-3ds.git#818f3e6a2bb6156334f3078918719444122fe2ed"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "n3ds-controller"
