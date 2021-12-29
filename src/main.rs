@@ -5,7 +5,7 @@ use ctru::{
     Gfx,
 };
 use std::io::Write;
-use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream};
 use std::time::Duration;
 
 fn main() {
@@ -17,7 +17,7 @@ fn main() {
 
     println!("Hello, world!");
 
-    let tcp_listener = match TcpListener::bind((Ipv4Addr::new(192, 168, 1, 135), 80)) {
+    let tcp_listener = match TcpListener::bind("0.0.0.0:80") {
         Ok(socket) => socket,
         Err(e) => {
             println!("Error while binding: {}", e);
