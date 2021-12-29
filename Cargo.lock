@@ -29,7 +29,7 @@ dependencies = [
 [[package]]
 name = "libc"
 version = "0.2.105"
-source = "git+https://github.com/Meziu/libc.git#6761f3c45f3958359788444f8fee7fe3560316a2"
+source = "git+https://github.com/Meziu/libc.git#b3363cd730adf81b46194f483f2afd7b84bbf78e"
 
 [[package]]
 name = "linker-fix-3ds"
