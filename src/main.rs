@@ -65,6 +65,5 @@ fn main() {
 
 fn write_hello_world(mut stream: TcpStream) -> std::io::Result<()> {
     stream.set_nonblocking(false)?;
-    stream.write_all(b"Hello world!\n")?;
-    stream.flush()
+    stream.write_all(b"Hello world!\n")
 }
