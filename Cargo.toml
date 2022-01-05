@@ -5,6 +5,9 @@ edition = "2021"
 authors = ["Mark Drobnak <mark.drobnak@gmail.com>"]
 description = "Use the 3DS as a controller for PC games"
 
+[profile.release]
+debug = 1
+
 [dependencies]
 ctru-rs = { path = "ctru-rs/ctru-rs" }
 
