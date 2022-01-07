@@ -35,7 +35,7 @@ source = "git+https://github.com/Meziu/libc.git#2de354450c6583858329866ee2eaa338
 [[package]]
 name = "linker-fix-3ds"
 version = "0.1.0"
-source = "git+https://github.com/AzureMarker/rust-linker-fix-3ds.git#3220e60578c2cac07686f28ab134d8c243312039"
+source = "git+https://github.com/Meziu/rust-linker-fix-3ds.git#a554d6d9e41c82bad519d17e7bfd15f36032b246"
 dependencies = [
  "libc",
 ]
@@ -50,7 +50,7 @@ dependencies = [
 [[package]]
 name = "pthread-3ds"
 version = "0.1.0"
-source = "git+https://github.com/AzureMarker/pthread-3ds.git#04a89ae72cbd66aefa027750f21e265c390f2dcd"
+source = "git+https://github.com/Meziu/pthread-3ds.git#69eb0774f859431c3d4df5bf613c0aacd3ae0614"
 dependencies = [
  "libc",
 ]
