@@ -50,7 +50,7 @@ dependencies = [
 [[package]]
 name = "pthread-3ds"
 version = "0.1.0"
-source = "git+https://github.com/Meziu/pthread-3ds.git#69eb0774f859431c3d4df5bf613c0aacd3ae0614"
+source = "git+https://github.com/Meziu/pthread-3ds.git#cea081ac27cb173a9addeb5abb632412df6cef85"
 dependencies = [
  "libc",
 ]
