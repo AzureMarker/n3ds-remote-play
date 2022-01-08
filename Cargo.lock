@@ -11,6 +11,7 @@ checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
 [[package]]
 name = "ctru-rs"
 version = "0.7.1"
+source = "git+https://github.com/AzureMarker/ctru-rs#03c7a772c58bb8611e8493ee9fd1290eb83d9cab"
 dependencies = [
  "bitflags",
  "ctru-sys",
@@ -23,6 +24,7 @@ dependencies = [
 [[package]]
 name = "ctru-sys"
 version = "0.4.0"
+source = "git+https://github.com/AzureMarker/ctru-rs#03c7a772c58bb8611e8493ee9fd1290eb83d9cab"
 dependencies = [
  "libc",
 ]

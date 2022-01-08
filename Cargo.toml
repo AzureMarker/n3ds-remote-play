@@ -9,7 +9,7 @@ description = "Use the 3DS as a controller for PC games"
 debug = 1
 
 [dependencies]
-ctru-rs = { path = "ctru-rs/ctru-rs" }
+ctru-rs = { git = "https://github.com/AzureMarker/ctru-rs" }
 
 [patch.crates-io]
 libc = { git = "https://github.com/Meziu/libc.git" }
