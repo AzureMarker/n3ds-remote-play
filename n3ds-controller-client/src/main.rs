@@ -14,7 +14,7 @@ fn main() {
     let hid = Hid::init().expect("Couldn't obtain HID controller");
     let apt = Apt::init().expect("Couldn't obtain APT controller");
     let soc = Soc::init().expect("Couldn't initialize networking");
-    let _console = Console::default();
+    let _console = Console::init(gfx.top_screen.borrow_mut());
 
     println!("Hello, world!");
 
@@ -26,7 +26,10 @@ fn main() {
             return;
         }
     };
-    println!("Started server socket.\nConnect to {}:80", soc.host_address());
+    println!(
+        "Started server socket.\nConnect to {}:80",
+        soc.host_address()
+    );
     tcp_listener
         .set_nonblocking(true)
         .expect("Couldn't make socket nonblocking");

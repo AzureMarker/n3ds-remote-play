@@ -1,0 +1,8 @@
+[package]
+name = "n3ds-controller-server"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mark Drobnak <mark.drobnak@gmail.com>"]
+description = "Use the 3DS as a controller for PC games. This is the server side which runs on the PC."
+
+[dependencies]

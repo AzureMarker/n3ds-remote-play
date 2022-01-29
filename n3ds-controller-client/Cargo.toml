@@ -1,0 +1,9 @@
+[package]
+name = "n3ds-controller-client"
+version = "0.1.0"
+edition = "2021"
+authors = ["Mark Drobnak <mark.drobnak@gmail.com>"]
+description = "Use the 3DS as a controller for PC games. This is the client side which runs on the 3DS."
+
+[dependencies]
+ctru-rs = { path = "../../ctru-rs/ctru-rs" }
