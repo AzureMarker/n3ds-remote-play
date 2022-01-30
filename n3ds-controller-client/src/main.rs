@@ -6,7 +6,7 @@ use ctru::{
     Gfx,
 };
 use std::io::Write;
-use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::net::{Ipv4Addr, TcpStream};
 use std::str::FromStr;
 use std::time::Duration;
 
@@ -16,7 +16,7 @@ fn main() {
     gfx.top_screen.borrow_mut().set_wide_mode(true);
     let hid = Hid::init().expect("Couldn't obtain HID controller");
     let apt = Apt::init().expect("Couldn't obtain APT controller");
-    let soc = Soc::init().expect("Couldn't initialize networking");
+    let _soc = Soc::init().expect("Couldn't initialize networking");
     let _console = Console::init(gfx.top_screen.borrow_mut());
 
     println!("Enter the n3ds-controller server IP");
