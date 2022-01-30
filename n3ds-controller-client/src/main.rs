@@ -1,3 +1,4 @@
+use ctru::applets::swkbd::{Button, Swkbd};
 use ctru::services::soc::Soc;
 use ctru::{
     console::Console,
@@ -5,69 +6,88 @@ use ctru::{
     Gfx,
 };
 use std::io::Write;
-use std::net::{TcpListener, TcpStream};
+use std::net::{Ipv4Addr, TcpListener, TcpStream};
+use std::str::FromStr;
 use std::time::Duration;
 
 fn main() {
     ctru::init();
     let gfx = Gfx::default();
+    gfx.top_screen.borrow_mut().set_wide_mode(true);
     let hid = Hid::init().expect("Couldn't obtain HID controller");
     let apt = Apt::init().expect("Couldn't obtain APT controller");
     let soc = Soc::init().expect("Couldn't initialize networking");
     let _console = Console::init(gfx.top_screen.borrow_mut());
 
-    println!("Hello, world!");
-
-    let tcp_listener = match TcpListener::bind("0.0.0.0:80") {
-        Ok(socket) => socket,
-        Err(e) => {
-            println!("Error while binding: {}", e);
-            std::thread::sleep(Duration::from_secs(2));
-            return;
-        }
+    println!("Enter the n3ds-controller server IP");
+    let server_ip = match get_server_ip() {
+        Some(server_ip) => server_ip,
+        None => return,
     };
+
+    let mut connection =
+        TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
+    connection.set_nonblocking(true).unwrap();
+
     println!(
-        "Started server socket.\nConnect to {}:80",
-        soc.host_address()
+        "Connected to server. Button presses will be sent to the server. Press START to exit."
     );
-    tcp_listener
-        .set_nonblocking(true)
-        .expect("Couldn't make socket nonblocking");
 
     // Main loop
     while apt.main_loop() {
-        // Scan all the inputs. This should be done once for each frame
         hid.scan_input();
 
-        if hid.keys_down().contains(KeyPad::KEY_START) {
+        let keys_down = hid.keys_down();
+        let keys_up = hid.keys_up();
+
+        if keys_down.contains(KeyPad::KEY_START) {
             break;
         }
 
-        match tcp_listener.accept() {
-            Ok((stream, socket_addr)) => {
-                println!("Got connection from {}", socket_addr);
-                if let Err(e) = write_hello_world(stream) {
-                    println!("Error writing response: {}", e);
-                }
-            }
-            Err(e) => match e.kind() {
-                std::io::ErrorKind::WouldBlock => {}
-                _ => {
-                    println!("Error accepting connection: {}", e)
-                }
-            },
+        if keys_down.contains(KeyPad::KEY_A) {
+            connection.write_all(b"DOWN: A\n").unwrap();
         }
 
-        // Flush and swap frame buffers
+        if keys_up.contains(KeyPad::KEY_A) {
+            connection.write_all(b"UP: A\n").unwrap();
+        }
+
         gfx.flush_buffers();
         gfx.swap_buffers();
-
-        // Wait for VBlank
         gfx.wait_for_vblank();
     }
 }
 
-fn write_hello_world(mut stream: TcpStream) -> std::io::Result<()> {
-    stream.set_nonblocking(false)?;
-    stream.write_all(b"Hello world!\n")
+fn get_server_ip() -> Option<Ipv4Addr> {
+    let mut keyboard = Swkbd::default();
+    let mut input = String::new();
+
+    loop {
+        match keyboard.get_utf8(&mut input) {
+            Ok(Button::Right) => {
+                // Clicked "OK"
+                let ip_addr = match Ipv4Addr::from_str(&input) {
+                    Ok(ip_addr) => ip_addr,
+                    Err(_) => {
+                        println!("Invalid IP address, try again");
+                        continue;
+                    }
+                };
+                return Some(ip_addr);
+            }
+            Ok(Button::Left) => {
+                // Clicked "Cancel"
+                println!("Cancel was clicked, exiting in 5 seconds...");
+                std::thread::sleep(Duration::from_secs(5));
+                return None;
+            }
+            Ok(Button::Middle) => {
+                // This button wasn't shown
+                unreachable!()
+            }
+            Err(e) => {
+                panic!("Error: {:?}", e)
+            }
+        }
+    }
 }
