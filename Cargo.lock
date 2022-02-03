@@ -23,6 +23,7 @@ checksum = "a1d3d68618a1f2c2d86e0bd2adec82e31960ca11aaeb5f353ff01746a4e08f36"
 [[package]]
 name = "ctru-rs"
 version = "0.7.1"
+source = "git+https://github.com/Meziu/ctru-rs#77f673e9d995c0d29d9034337163ac0ef7a33484"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -38,6 +39,7 @@ dependencies = [
 [[package]]
 name = "ctru-sys"
 version = "0.4.0"
+source = "git+https://github.com/Meziu/ctru-rs#77f673e9d995c0d29d9034337163ac0ef7a33484"
 dependencies = [
  "libc",
 ]
@@ -45,13 +47,14 @@ dependencies = [
 [[package]]
 name = "libc"
 version = "0.2.116"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "565dbd88872dbe4cc8a46e527f26483c1d1f7afa6b884a3bd6cd893d4f98da74"
+source = "git+https://github.com/Meziu/libc#4d2f997c2f6659dc7d1230b6290ade2efde917dd"
 
 [[package]]
 name = "linker-fix-3ds"
 version = "0.1.0"
+source = "git+https://github.com/Meziu/rust-linker-fix-3ds.git#ac276169d97e0e5f6cb745a37550af404293f193"
 dependencies = [
+ "ctru-sys",
  "libc",
 ]
 
@@ -69,6 +72,7 @@ version = "0.1.0"
 [[package]]
 name = "pthread-3ds"
 version = "0.1.0"
+source = "git+https://github.com/Meziu/pthread-3ds.git#39d601003d7fd77e763ef0af29ed0ae1b6e799b4"
 dependencies = [
  "libc",
 ]
