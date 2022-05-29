@@ -1,11 +1,17 @@
-use std::io::{BufRead, BufReader};
-use std::net::TcpListener;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::net::TcpListener;
+use tokio_stream::wrappers::TcpListenerStream;
+use tokio_stream::StreamExt;
 
-fn main() {
+#[tokio::main]
+async fn main() {
     println!("Starting n3ds-controller server on 0.0.0.0:3535");
-    let tcp_listener = TcpListener::bind(("0.0.0.0", 3535)).expect("Failed to bind address");
+    let tcp_listener = TcpListener::bind(("0.0.0.0", 3535))
+        .await
+        .expect("Failed to bind address");
+    let mut tcp_stream = TcpListenerStream::new(tcp_listener);
 
-    for connection in tcp_listener.incoming() {
+    while let Some(connection) = tcp_stream.next().await {
         let connection = match connection {
             Ok(connection) => BufReader::new(connection),
             Err(e) => {
@@ -23,7 +29,8 @@ fn main() {
 
         println!("New connection from {peer_addr}");
 
-        for line in connection.lines() {
+        let mut connection_lines = connection.lines();
+        while let Some(line) = connection_lines.next_line().await.transpose() {
             match line {
                 Ok(line) => println!("[{peer_addr}] {line}"),
                 Err(e) => {

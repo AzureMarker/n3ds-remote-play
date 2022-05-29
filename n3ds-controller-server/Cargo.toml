@@ -6,3 +6,5 @@ authors = ["Mark Drobnak <mark.drobnak@gmail.com>"]
 description = "Use the 3DS as a controller for PC games. This is the server side which runs on the PC."
 
 [dependencies]
+tokio = { version = "1.18", features = ["full"] }
+tokio-stream = { version = "0.1", features = ["net"] }
