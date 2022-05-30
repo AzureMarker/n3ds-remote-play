@@ -1,10 +1,12 @@
-use ctru::applets::swkbd::{Button, Swkbd};
+use bincode::Options;
+use ctru::applets::swkbd::{self, Swkbd};
 use ctru::services::soc::Soc;
 use ctru::{
     console::Console,
     services::{hid::KeyPad, Apt, Hid},
     Gfx,
 };
+use n3ds_controller_common::{Button, ButtonAction, InputMessage};
 use std::io::Write;
 use std::net::{Ipv4Addr, TcpStream};
 use std::str::FromStr;
@@ -12,7 +14,7 @@ use std::time::Duration;
 
 fn main() {
     ctru::init();
-    let gfx = Gfx::default();
+    let gfx = Gfx::init().expect("Couldn't obtain GFX controller");
     gfx.top_screen.borrow_mut().set_wide_mode(true);
     let hid = Hid::init().expect("Couldn't obtain HID controller");
     let apt = Apt::init().expect("Couldn't obtain APT controller");
@@ -45,11 +47,19 @@ fn main() {
         }
 
         if keys_down.contains(KeyPad::KEY_A) {
-            connection.write_all(b"DOWN: A\n").unwrap();
+            let message = InputMessage::Button {
+                action: ButtonAction::Pressed,
+                button: Button::A,
+            };
+            send_message(message, &mut connection).unwrap();
         }
 
         if keys_up.contains(KeyPad::KEY_A) {
-            connection.write_all(b"UP: A\n").unwrap();
+            let message = InputMessage::Button {
+                action: ButtonAction::Released,
+                button: Button::A,
+            };
+            send_message(message, &mut connection).unwrap();
         }
 
         gfx.flush_buffers();
@@ -58,13 +68,26 @@ fn main() {
     }
 }
 
+fn send_message(message: InputMessage, connection: &mut TcpStream) -> anyhow::Result<()> {
+    let bincode_options = bincode::DefaultOptions::new();
+    let message_size: u32 = bincode_options.serialized_size(&message)?.try_into()?;
+    let mut buffer = Vec::new();
+
+    buffer.extend_from_slice(&message_size.to_be_bytes());
+    bincode_options.serialize_into(&mut buffer, &message)?;
+
+    println!("Sending {message:?}");
+
+    Ok(connection.write_all(&buffer)?)
+}
+
 fn get_server_ip() -> Option<Ipv4Addr> {
     let mut keyboard = Swkbd::default();
     let mut input = String::new();
 
     loop {
         match keyboard.get_utf8(&mut input) {
-            Ok(Button::Right) => {
+            Ok(swkbd::Button::Right) => {
                 // Clicked "OK"
                 let ip_addr = match Ipv4Addr::from_str(&input) {
                     Ok(ip_addr) => ip_addr,
@@ -75,13 +98,13 @@ fn get_server_ip() -> Option<Ipv4Addr> {
                 };
                 return Some(ip_addr);
             }
-            Ok(Button::Left) => {
+            Ok(swkbd::Button::Left) => {
                 // Clicked "Cancel"
                 println!("Cancel was clicked, exiting in 5 seconds...");
                 std::thread::sleep(Duration::from_secs(5));
                 return None;
             }
-            Ok(Button::Middle) => {
+            Ok(swkbd::Button::Middle) => {
                 // This button wasn't shown
                 unreachable!()
             }

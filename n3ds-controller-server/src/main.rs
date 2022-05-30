@@ -1,7 +1,12 @@
-use tokio::io::{AsyncBufReadExt, BufReader};
+use n3ds_controller_common::InputMessage;
+use std::error::Error;
+use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
+use tokio_serde::formats::SymmetricalBincode;
+use tokio_serde::SymmetricallyFramed;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_stream::StreamExt;
+use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
 
 #[tokio::main]
 async fn main() {
@@ -36,10 +41,25 @@ async fn handle_connection(tcp_stream: TcpStream) {
 
     println!("New connection from {peer_addr}");
 
-    let mut connection_lines = connection.lines();
-    while let Some(line) = connection_lines.next_line().await.transpose() {
-        match line {
-            Ok(line) => println!("[{peer_addr}] {line}"),
+    // let device = match create_device().await {
+    //     Ok(device) => device,
+    //     Err(e) => {
+    //         eprintln!("Closing connection with [{peer_addr}] due to error:\n{e}");
+    //         return;
+    //     }
+    // };
+    // println!("Created uinput device");
+
+    let mut message_stream = SymmetricallyFramed::new(
+        FramedRead::new(connection, LengthDelimitedCodec::new()),
+        SymmetricalBincode::<InputMessage>::default(),
+    );
+
+    while let Some(message) = message_stream.try_next().await.transpose() {
+        match message {
+            Ok(message) => {
+                println!("[{peer_addr}] {message:?}");
+            }
             Err(e) => {
                 eprintln!("Error while reading stream: {e}");
                 if e.kind() == std::io::ErrorKind::ConnectionReset {
@@ -50,4 +70,14 @@ async fn handle_connection(tcp_stream: TcpStream) {
     }
 
     println!("Closing connection with [{peer_addr}]");
+}
+
+async fn create_device() -> Result<uinput_tokio::Device, Box<dyn Error>> {
+    uinput_tokio::default()
+        .map_err(|e| anyhow::Error::msg(e.to_string()))?
+        .name("test")
+        .map_err(|e| anyhow::Error::msg(e.to_string()))?
+        .event(uinput_tokio::event::Controller::All)?
+        .create()
+        .await
 }

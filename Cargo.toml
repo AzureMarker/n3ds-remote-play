@@ -1,5 +1,5 @@
 [workspace]
-members = ["n3ds-controller-client", "n3ds-controller-server"]
+members = ["n3ds-controller-client", "n3ds-controller-server", "n3ds-controller-common"]
 
 [profile.release]
 debug = 1
