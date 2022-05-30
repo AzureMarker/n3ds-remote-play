@@ -46,26 +46,56 @@ fn main() {
             break;
         }
 
-        if keys_down.contains(KeyPad::KEY_A) {
-            let message = InputMessage::Button {
-                action: ButtonAction::Pressed,
-                button: Button::A,
-            };
-            send_message(message, &mut connection).unwrap();
-        }
-
-        if keys_up.contains(KeyPad::KEY_A) {
-            let message = InputMessage::Button {
-                action: ButtonAction::Released,
-                button: Button::A,
-            };
-            send_message(message, &mut connection).unwrap();
-        }
+        send_keys(keys_down, ButtonAction::Pressed, &mut connection).unwrap();
+        send_keys(keys_up, ButtonAction::Released, &mut connection).unwrap();
 
         gfx.flush_buffers();
         gfx.swap_buffers();
         gfx.wait_for_vblank();
     }
+}
+
+fn send_keys(
+    keypad: KeyPad,
+    action: ButtonAction,
+    connection: &mut TcpStream,
+) -> anyhow::Result<()> {
+    macro_rules! handle_keys {
+        ($($keypad_key:ident => $button:ident),*) => {
+            $(
+            if keypad.contains(KeyPad::$keypad_key) {
+                send_message(
+                    InputMessage::Button {
+                        action,
+                        button: Button::$button,
+                    },
+                    connection,
+                )?;
+            }
+            )*
+        };
+    }
+
+    handle_keys!(
+        KEY_A => A,
+        KEY_B => B,
+        KEY_X => X,
+        KEY_Y => Y,
+        KEY_L => L,
+        KEY_R => R,
+        KEY_DUP => Up,
+        KEY_DDOWN => Down,
+        KEY_DLEFT => Left,
+        KEY_DRIGHT => Right,
+        KEY_CPAD_UP => Up,
+        KEY_CPAD_DOWN => Down,
+        KEY_CPAD_LEFT => Left,
+        KEY_CPAD_RIGHT => Right,
+        KEY_START => Start,
+        KEY_SELECT => Select
+    );
+
+    Ok(())
 }
 
 fn send_message(message: InputMessage, connection: &mut TcpStream) -> anyhow::Result<()> {
