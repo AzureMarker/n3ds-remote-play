@@ -6,3 +6,5 @@ debug = 1
 
 [patch.crates-io]
 libc = { git = "https://github.com/Meziu/libc" }
+uinput-tokio = { git = "https://github.com/AzureMarker/uinput-tokio.git" }
+#uinput-tokio = { path = "../uinput-tokio" }

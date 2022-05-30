@@ -192,26 +192,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "349d5a591cd28b49e1d1037471617a32ddcda5731b99419008085f72d5a53836"
 
 [[package]]
-name = "libudev"
-version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea626d3bdf40a1c5aee3bcd4f40826970cae8d80a8fec934c82a63840094dcfe"
-dependencies = [
- "libc 0.2.126",
- "libudev-sys",
-]
-
-[[package]]
-name = "libudev-sys"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c8469b4a23b962c1396b9b451dda50ef5b283e8dd309d69033475fa9b334324"
-dependencies = [
- "libc 0.2.126",
- "pkg-config",
-]
-
-[[package]]
 name = "linker-fix-3ds"
 version = "0.1.0"
 source = "git+https://github.com/Meziu/rust-linker-fix-3ds.git#080f7af4f2193892cca69da271e7dfad2aaba4e4"
@@ -397,12 +377,6 @@ name = "pin-project-lite"
 version = "0.2.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0a7ae3ac2f1173085d398531c705756c94a4c56843785df85a60c1a0afac116"
-
-[[package]]
-name = "pkg-config"
-version = "0.3.25"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1df8c4ec4b0627e53bdf214615ad287367e482558cf84b109250b37464dc03ae"
 
 [[package]]
 name = "proc-macro2"
@@ -656,13 +630,11 @@ dependencies = [
 [[package]]
 name = "uinput-tokio"
 version = "0.1.35"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0a6385f2785ba9350a1c8b1d0108de390d52b24e9b0e89dee20be2aa64637ac8"
+source = "git+https://github.com/AzureMarker/uinput-tokio.git#91b6613e4538a77f601ca33b809283a97db9367b"
 dependencies = [
  "custom_derive",
  "enum_derive",
  "libc 0.2.126",
- "libudev",
  "nix",
  "tokio",
  "uinput-sys",
