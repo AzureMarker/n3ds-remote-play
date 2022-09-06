@@ -32,7 +32,8 @@ fn main() {
     connection.set_nonblocking(true).unwrap();
 
     println!(
-        "Connected to server. Button presses will be sent to the server. Press START to exit."
+        "Connected to server. Button presses will be sent to the server. \
+        Press START + SELECT to exit."
     );
 
     // Main loop
@@ -41,11 +42,15 @@ fn main() {
 
         let keys_down = hid.keys_down();
         let keys_up = hid.keys_up();
+        let keys_down_or_held = keys_down.union(hid.keys_held());
 
-        if keys_down.contains(KeyPad::KEY_START) {
+        if keys_down_or_held.contains(KeyPad::KEY_START)
+            && keys_down_or_held.contains(KeyPad::KEY_SELECT)
+        {
             break;
         }
 
+        // FIXME: handle case where button was both pressed and released
         send_keys(keys_down, ButtonAction::Pressed, &mut connection).unwrap();
         send_keys(keys_up, ButtonAction::Released, &mut connection).unwrap();
 

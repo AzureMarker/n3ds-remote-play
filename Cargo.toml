@@ -3,8 +3,3 @@ members = ["n3ds-controller-client", "n3ds-controller-server", "n3ds-controller-
 
 [profile.release]
 debug = 1
-
-[patch.crates-io]
-libc = { git = "https://github.com/Meziu/libc" }
-uinput-tokio = { git = "https://github.com/AzureMarker/uinput-tokio.git" }
-#uinput-tokio = { path = "../uinput-tokio" }

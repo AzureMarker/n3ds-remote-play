@@ -12,6 +12,7 @@ tokio = { version = "1.18", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-serde = { version = "0.8", features = ["bincode"] }
 tokio-util = { version = "0.7", features = ["codec"] }
-uinput-tokio = { version = "0.1", default-features = false }
+input-linux = "0.5"
+libc = "0.2"
 
 n3ds-controller-common = { path = "../n3ds-controller-common" }
