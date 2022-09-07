@@ -1,5 +1,6 @@
 use bincode::Options;
 use ctru::applets::swkbd::{self, Swkbd};
+use ctru::services::hid::CirclePosition;
 use ctru::services::soc::Soc;
 use ctru::{
     console::Console,
@@ -37,6 +38,8 @@ fn main() {
     );
 
     // Main loop
+    let mut circle_position = CirclePosition::new();
+    let mut last_circle_position = (0, 0);
     while apt.main_loop() {
         hid.scan_input();
 
@@ -50,9 +53,20 @@ fn main() {
             break;
         }
 
-        // FIXME: handle case where button was both pressed and released
+        // Send button press updates
         send_keys(keys_down, ButtonAction::Pressed, &mut connection).unwrap();
         send_keys(keys_up, ButtonAction::Released, &mut connection).unwrap();
+
+        // Send circle pad update if it changed
+        let new_circle_position = circle_position.get();
+        if new_circle_position != last_circle_position {
+            send_message(
+                InputMessage::CirclePadPosition(new_circle_position.0, new_circle_position.1),
+                &mut connection,
+            )
+            .unwrap();
+        }
+        last_circle_position = new_circle_position;
 
         gfx.flush_buffers();
         gfx.swap_buffers();
@@ -92,10 +106,6 @@ fn send_keys(
         KEY_DDOWN => Down,
         KEY_DLEFT => Left,
         KEY_DRIGHT => Right,
-        KEY_CPAD_UP => Up,
-        KEY_CPAD_DOWN => Down,
-        KEY_CPAD_LEFT => Left,
-        KEY_CPAD_RIGHT => Right,
         KEY_START => Start,
         KEY_SELECT => Select
     );

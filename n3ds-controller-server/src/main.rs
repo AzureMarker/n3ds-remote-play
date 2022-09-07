@@ -13,6 +13,9 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tokio_stream::StreamExt;
 use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
 
+const PRO_CONTROLLER_LEFT_AXES_LIMIT: i32 = 32767;
+const N3DS_CPAD_AXES_LIMIT: i32 = 156;
+
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     println!("Starting n3ds-controller server on 0.0.0.0:3535");
@@ -118,8 +121,8 @@ async fn create_device() -> anyhow::Result<UInputHandle<File>> {
     handle.set_absbit(AbsoluteAxis::RY)?;
 
     let axis_absolute_info = AbsoluteInfo {
-        minimum: -32767,
-        maximum: 32767,
+        minimum: -PRO_CONTROLLER_LEFT_AXES_LIMIT,
+        maximum: PRO_CONTROLLER_LEFT_AXES_LIMIT,
         fuzz: 250,
         flat: 500,
         value: 0,
@@ -215,6 +218,25 @@ async fn emit_input_action(
 
             device.write(&[
                 event,
+                *SynchronizeEvent::new(EventTime::default(), SynchronizeKind::Report, 0)
+                    .as_event()
+                    .as_raw(),
+            ])?;
+        }
+        InputMessage::CirclePadPosition(x, y) => {
+            let pro_x = (x as f32 / N3DS_CPAD_AXES_LIMIT as f32
+                * PRO_CONTROLLER_LEFT_AXES_LIMIT as f32) as i32;
+            // Note: the Y dimension is negated because the 3DS has an inverted CPAD Y dimension.
+            let pro_y = -(y as f32 / N3DS_CPAD_AXES_LIMIT as f32
+                * PRO_CONTROLLER_LEFT_AXES_LIMIT as f32) as i32;
+
+            device.write(&[
+                *AbsoluteEvent::new(EventTime::default(), AbsoluteAxis::X, pro_x)
+                    .as_event()
+                    .as_raw(),
+                *AbsoluteEvent::new(EventTime::default(), AbsoluteAxis::Y, pro_y)
+                    .as_event()
+                    .as_raw(),
                 *SynchronizeEvent::new(EventTime::default(), SynchronizeKind::Report, 0)
                     .as_event()
                     .as_raw(),

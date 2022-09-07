@@ -8,6 +8,7 @@ pub enum InputMessage {
         action: ButtonAction,
         button: Button,
     },
+    CirclePadPosition(i16, i16),
 }
 
 #[derive(Serialize, Deserialize, Copy, Clone, Debug)]
