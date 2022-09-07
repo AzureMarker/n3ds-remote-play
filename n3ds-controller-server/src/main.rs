@@ -99,6 +99,8 @@ async fn create_device() -> anyhow::Result<UInputHandle<File>> {
     handle.set_keybit(Key::ButtonWest)?;
     handle.set_keybit(Key::ButtonTL)?;
     handle.set_keybit(Key::ButtonTR)?;
+    handle.set_keybit(Key::ButtonTL2)?;
+    handle.set_keybit(Key::ButtonTR2)?;
     handle.set_keybit(Key::ButtonStart)?;
     handle.set_keybit(Key::ButtonSelect)?;
 
@@ -112,8 +114,6 @@ async fn create_device() -> anyhow::Result<UInputHandle<File>> {
     // them for compatibility with the Switch Pro Controller (helps games and
     // browsers remap them).
     handle.set_keybit(Key::ButtonZ)?;
-    handle.set_keybit(Key::ButtonTL2)?;
-    handle.set_keybit(Key::ButtonTR2)?;
     handle.set_keybit(Key::ButtonThumbl)?;
     handle.set_keybit(Key::ButtonThumbr)?;
     handle.set_keybit(Key::ButtonMode)?;
@@ -208,6 +208,8 @@ async fn emit_input_action(
                 Button::Y => key_event(Key::ButtonWest, key_state),
                 Button::L => key_event(Key::ButtonTL, key_state),
                 Button::R => key_event(Key::ButtonTR, key_state),
+                Button::ZL => key_event(Key::ButtonTL2, key_state),
+                Button::ZR => key_event(Key::ButtonTR2, key_state),
                 Button::Start => key_event(Key::ButtonStart, key_state),
                 Button::Select => key_event(Key::ButtonSelect, key_state),
                 Button::Up => absolute_event(AbsoluteAxis::Hat0Y, -absolute_value),

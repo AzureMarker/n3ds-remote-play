@@ -80,7 +80,7 @@ fn send_keys(
     connection: &mut TcpStream,
 ) -> anyhow::Result<()> {
     macro_rules! handle_keys {
-        ($($keypad_key:ident => $button:ident),*) => {
+        ($($keypad_key:ident => $button:ident),* $(,)?) => {
             $(
             if keypad.contains(KeyPad::$keypad_key) {
                 send_message(
@@ -107,7 +107,11 @@ fn send_keys(
         KEY_DLEFT => Left,
         KEY_DRIGHT => Right,
         KEY_START => Start,
-        KEY_SELECT => Select
+        KEY_SELECT => Select,
+
+        // New 3DS specific
+        KEY_ZL => ZL,
+        KEY_ZR => ZR,
     );
 
     Ok(())

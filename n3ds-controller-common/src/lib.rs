@@ -25,6 +25,8 @@ pub enum Button {
     Y,
     L,
     R,
+    ZL,
+    ZR,
     Up,
     Down,
     Left,
