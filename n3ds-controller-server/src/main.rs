@@ -1,5 +1,6 @@
-use crate::virtual_device::VirtualDevice;
+use crate::virtual_device::{VirtualDevice, VirtualDeviceFactory};
 use n3ds_controller_common::InputMessage;
+use std::sync::Arc;
 use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_serde::formats::SymmetricalBincode;
@@ -17,11 +18,14 @@ async fn main() {
         .await
         .expect("Failed to bind address");
     let mut tcp_stream = TcpListenerStream::new(tcp_listener);
+    let device_factory = Arc::new(
+        virtual_device::new_device_factory().expect("Failed to create virtual device factory"),
+    );
 
     while let Some(connection) = tcp_stream.next().await {
         match connection {
             Ok(connection) => {
-                tokio::spawn(handle_connection(connection));
+                tokio::spawn(handle_connection(connection, Arc::clone(&device_factory)));
             }
             Err(e) => {
                 eprintln!("New connection error: {e}");
@@ -31,7 +35,7 @@ async fn main() {
     }
 }
 
-async fn handle_connection(tcp_stream: TcpStream) {
+async fn handle_connection(tcp_stream: TcpStream, device_factory: Arc<impl VirtualDeviceFactory>) {
     let connection = BufReader::new(tcp_stream);
     let peer_addr = match connection.get_ref().peer_addr() {
         Ok(peer_addr) => peer_addr,
@@ -43,7 +47,7 @@ async fn handle_connection(tcp_stream: TcpStream) {
 
     println!("New connection from {peer_addr}");
 
-    let device = match virtual_device::new().await {
+    let mut device = match device_factory.new_device().await {
         Ok(device) => device,
         Err(e) => {
             eprintln!("Closing connection with [{peer_addr}] due to error:\n{e:?}");

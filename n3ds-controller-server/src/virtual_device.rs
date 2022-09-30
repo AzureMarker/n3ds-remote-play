@@ -4,16 +4,29 @@ use n3ds_controller_common::InputMessage;
 #[cfg(target_os = "linux")]
 mod linux;
 
-/// Creates a new virtual device using the platform-specific APIs.
-pub async fn new() -> anyhow::Result<impl VirtualDevice> {
+#[cfg(target_os = "windows")]
+mod windows;
+
+/// Creates a new virtual device factory using the platform-specific APIs.
+pub fn new_device_factory() -> anyhow::Result<impl VirtualDeviceFactory> {
     #[cfg(target_os = "linux")]
-    linux::UInputDevice::new().await
+    return Ok(linux::UInputDeviceFactory);
+    #[cfg(target_os = "windows")]
+    return windows::ViGEmDeviceFactory::new();
+}
+
+/// A virtual device factory creates virtual devices.
+///
+/// Some virtual device APIs require setup work before they can create a device,
+/// hence this trait.
+#[async_trait]
+pub trait VirtualDeviceFactory {
+    type Device: VirtualDevice;
+
+    async fn new_device(&self) -> anyhow::Result<Self::Device>;
 }
 
 /// A virtual device acts like a real gamepad device, but is controlled by software.
-#[async_trait]
-pub trait VirtualDevice: Sized {
-    async fn new() -> anyhow::Result<Self>;
-
-    fn emit_input(&self, message: InputMessage) -> anyhow::Result<()>;
+pub trait VirtualDevice: Sized + Send {
+    fn emit_input(&mut self, message: InputMessage) -> anyhow::Result<()>;
 }

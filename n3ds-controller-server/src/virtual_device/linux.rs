@@ -1,4 +1,4 @@
-use crate::virtual_device::VirtualDevice;
+use crate::virtual_device::{VirtualDevice, VirtualDeviceFactory};
 use async_trait::async_trait;
 use input_linux::{
     AbsoluteAxis, AbsoluteEvent, AbsoluteInfo, AbsoluteInfoSetup, EventKind, EventTime, InputId,
@@ -10,13 +10,13 @@ use tokio::fs::{File, OpenOptions};
 const PRO_CONTROLLER_LEFT_AXES_LIMIT: i32 = 32767;
 const N3DS_CPAD_AXES_LIMIT: i32 = 156;
 
-pub struct UInputDevice {
-    handle: UInputHandle<File>,
-}
+pub struct UInputDeviceFactory;
 
 #[async_trait]
-impl VirtualDevice for UInputDevice {
-    async fn new() -> anyhow::Result<Self> {
+impl VirtualDeviceFactory for UInputDeviceFactory {
+    type Device = UInputDevice;
+
+    async fn new_device(&self) -> anyhow::Result<Self::Device> {
         let uinput_file = OpenOptions::new()
             .read(true)
             .write(true)
@@ -107,10 +107,16 @@ impl VirtualDevice for UInputDevice {
             ],
         )?;
 
-        Ok(Self { handle })
+        Ok(UInputDevice { handle })
     }
+}
 
-    fn emit_input(&self, message: InputMessage) -> anyhow::Result<()> {
+pub struct UInputDevice {
+    handle: UInputHandle<File>,
+}
+
+impl VirtualDevice for UInputDevice {
+    fn emit_input(&mut self, message: InputMessage) -> anyhow::Result<()> {
         match message {
             InputMessage::Button { action, button } => {
                 let key_event = |key: Key, state: KeyState| {

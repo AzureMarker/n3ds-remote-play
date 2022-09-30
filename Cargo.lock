@@ -249,6 +249,7 @@ dependencies = [
  "tokio-serde",
  "tokio-stream",
  "tokio-util",
+ "vigem-client",
 ]
 
 [[package]]
@@ -592,6 +593,15 @@ name = "unicode-ident"
 version = "1.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c4f5b37a154999a8f3f98cc23a628d850e154479cd94decf3414696e12e31aaf"
+
+[[package]]
+name = "vigem-client"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b857e6f99efe1e1eb1e4dfb035de8ae7ec8ec56bd1928edcbd7c6e4427634d52"
+dependencies = [
+ "winapi",
+]
 
 [[package]]
 name = "wasi"
