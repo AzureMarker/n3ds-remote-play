@@ -6,6 +6,8 @@ use std::ops::Not;
 use std::sync::Arc;
 use vigem_client::{TargetId, XButtons, XGamepad, Xbox360Wired};
 
+const N3DS_CPAD_AXES_LIMIT: i32 = 156;
+
 pub struct ViGEmDeviceFactory {
     client: Arc<vigem_client::Client>,
 }
@@ -51,12 +53,8 @@ impl VirtualDevice for ViGEmDevice {
                     Button::Y => XButtons::Y,
                     Button::L => XButtons::LB,
                     Button::R => XButtons::RB,
-                    Button::ZL => {
-                        todo!()
-                    }
-                    Button::ZR => {
-                        todo!()
-                    }
+                    Button::ZL => XButtons::LTHUMB,
+                    Button::ZR => XButtons::RTHUMB,
                     Button::Up => XButtons::UP,
                     Button::Down => XButtons::DOWN,
                     Button::Left => XButtons::LEFT,
@@ -74,7 +72,10 @@ impl VirtualDevice for ViGEmDevice {
                     }
                 }
             }
-            InputMessage::CirclePadPosition(x, y) => {}
+            InputMessage::CirclePadPosition(x, y) => {
+                self.gamepad.thumb_lx = (x as f32 / N3DS_CPAD_AXES_LIMIT as f32) * 100;
+                self.gamepad.thumb_ly = (y as f32 / N3DS_CPAD_AXES_LIMIT as f32) * 100;
+            }
         }
 
         self.target.update(&self.gamepad)?;
