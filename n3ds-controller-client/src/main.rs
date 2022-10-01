@@ -1,11 +1,11 @@
 use bincode::Options;
 use ctru::applets::swkbd::{self, Swkbd};
+use ctru::gfx::Gfx;
 use ctru::services::hid::CirclePosition;
 use ctru::services::soc::Soc;
 use ctru::{
     console::Console,
     services::{hid::KeyPad, Apt, Hid},
-    Gfx,
 };
 use n3ds_controller_common::{Button, ButtonAction, InputMessage};
 use std::io::Write;
