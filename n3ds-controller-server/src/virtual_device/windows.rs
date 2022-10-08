@@ -60,21 +60,21 @@ impl VirtualDevice for ViGEmDevice {
                     Button::Left => XButtons::LEFT,
                     Button::Right => XButtons::RIGHT,
                     Button::Start => XButtons::START,
-                    Button::Select => XButtons::GUIDE,
+                    Button::Select => XButtons::BACK,
                 };
 
                 match action {
                     ButtonAction::Pressed => {
-                        self.gamepad.buttons |= xinput_button;
+                        self.gamepad.buttons.raw |= xinput_button;
                     }
                     ButtonAction::Released => {
-                        self.gamepad.buttons &= xinput_button.not();
+                        self.gamepad.buttons.raw &= xinput_button.not();
                     }
                 }
             }
             InputMessage::CirclePadPosition(x, y) => {
-                self.gamepad.thumb_lx = (x as f32 / N3DS_CPAD_AXES_LIMIT as f32) * 100;
-                self.gamepad.thumb_ly = (y as f32 / N3DS_CPAD_AXES_LIMIT as f32) * 100;
+                self.gamepad.thumb_lx = ((x as f32 / N3DS_CPAD_AXES_LIMIT as f32) * i16::MAX as f32) as i16;
+                self.gamepad.thumb_ly = ((y as f32 / N3DS_CPAD_AXES_LIMIT as f32) * i16::MAX as f32) as i16;
             }
         }
 
