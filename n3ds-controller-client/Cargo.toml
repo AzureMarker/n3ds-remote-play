@@ -8,6 +8,6 @@ description = "Use the 3DS as a controller for PC games. This is the client side
 [dependencies]
 anyhow = "1.0"
 bincode = "1.3"
-ctru-rs = { git = "https://github.com/Meziu/ctru-rs" }
+ctru-rs = { git = "https://github.com/rust3ds/ctru-rs" }
 
 n3ds-controller-common = { path = "../n3ds-controller-common" }

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use n3ds_controller_common::InputMessage;
+use n3ds_controller_common::InputState;
 
 #[cfg(target_os = "linux")]
 mod linux;
@@ -28,5 +28,5 @@ pub trait VirtualDeviceFactory {
 
 /// A virtual device acts like a real gamepad device, but is controlled by software.
 pub trait VirtualDevice: Sized + Send {
-    fn emit_input(&mut self, message: InputMessage) -> anyhow::Result<()>;
+    fn emit_input(&mut self, input_state: InputState) -> anyhow::Result<()>;
 }

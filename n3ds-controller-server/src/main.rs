@@ -1,5 +1,5 @@
 use crate::virtual_device::{VirtualDevice, VirtualDeviceFactory};
-use n3ds_controller_common::InputMessage;
+use n3ds_controller_common::InputState;
 use std::sync::Arc;
 use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
@@ -56,16 +56,16 @@ async fn handle_connection(tcp_stream: TcpStream, device_factory: Arc<impl Virtu
     };
     println!("Created uinput device");
 
-    let mut message_stream = SymmetricallyFramed::new(
+    let mut input_stream = SymmetricallyFramed::new(
         FramedRead::new(connection, LengthDelimitedCodec::new()),
-        SymmetricalBincode::<InputMessage>::default(),
+        SymmetricalBincode::<InputState>::default(),
     );
 
-    while let Some(message) = message_stream.try_next().await.transpose() {
-        match message {
-            Ok(message) => {
-                println!("[{peer_addr}] {message:?}");
-                device.emit_input(message).unwrap();
+    while let Some(input_result) = input_stream.try_next().await.transpose() {
+        match input_result {
+            Ok(input_state) => {
+                // println!("[{peer_addr}] {input_state:?}");
+                device.emit_input(input_state).unwrap();
             }
             Err(e) => {
                 eprintln!("Error while reading stream: {e}");
