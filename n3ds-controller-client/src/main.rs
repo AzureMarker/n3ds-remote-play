@@ -42,11 +42,10 @@ fn main() {
     let hid = Hid::init().expect("Couldn't obtain HID controller");
 
     println!("Enter the n3ds-controller server IP");
-    // let server_ip = match get_server_ip() {
-    //     Some(server_ip) => server_ip,
-    //     None => return,
-    // };
-    let server_ip = "192.168.1.3";
+    let server_ip = match get_server_ip() {
+        Some(server_ip) => server_ip,
+        None => return,
+    };
 
     let mut connection =
         TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
