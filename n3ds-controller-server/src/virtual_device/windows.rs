@@ -2,7 +2,6 @@ use crate::virtual_device::VirtualDeviceFactory;
 use crate::VirtualDevice;
 use async_trait::async_trait;
 use n3ds_controller_common::{InputState, KeyPad};
-use std::ops::Not;
 use std::sync::Arc;
 use vigem_client::{TargetId, XButtons, XGamepad, Xbox360Wired};
 
@@ -30,7 +29,6 @@ impl VirtualDeviceFactory for ViGEmDeviceFactory {
 
         Ok(ViGEmDevice {
             target,
-            gamepad: XGamepad::default(),
             // Initial guesses
             c_stick_range_x: (1500, 2500),
             c_stick_range_y: (1500, 2500),
@@ -40,7 +38,6 @@ impl VirtualDeviceFactory for ViGEmDeviceFactory {
 
 pub struct ViGEmDevice {
     target: Xbox360Wired<Arc<vigem_client::Client>>,
-    gamepad: XGamepad,
     c_stick_range_x: (u16, u16),
     c_stick_range_y: (u16, u16),
 }
@@ -51,7 +48,7 @@ impl VirtualDevice for ViGEmDevice {
         let mut gamepad = XGamepad::default();
 
         // Update buttons
-        let update_button = |input_key: KeyPad, xbox_button: u16| {
+        let mut update_button = |input_key: KeyPad, xbox_button: u16| {
             if input_state.key_pad.contains(input_key) {
                 gamepad.buttons.raw |= xbox_button;
             }
@@ -74,15 +71,15 @@ impl VirtualDevice for ViGEmDevice {
         if input_state.key_pad.contains(KeyPad::KEY_ZL) {
             gamepad.left_trigger = u8::MAX;
         }
-        if input_state.key_pad.contains(KeyPad::KEY_ZL) {
+        if input_state.key_pad.contains(KeyPad::KEY_ZR) {
             gamepad.right_trigger = u8::MAX;
         }
 
         // Update left stick (C-pad)
-        let cpad_x_percent = (input_state.circle_pad.x as f32 / N3DS_CPAD_AXES_LIMIT as f32);
-        self.gamepad.thumb_lx = (cpad_x_percent * i16::MAX as f32) as i16;
-        let cpad_y_percent = (input_state.circle_pad.y as f32 / N3DS_CPAD_AXES_LIMIT as f32);
-        self.gamepad.thumb_ly = (cpad_y_percent * i16::MAX as f32) as i16;
+        let cpad_x_percent = input_state.circle_pad.x as f32 / N3DS_CPAD_AXES_LIMIT as f32;
+        gamepad.thumb_lx = (cpad_x_percent * i16::MAX as f32) as i16;
+        let cpad_y_percent = input_state.circle_pad.y as f32 / N3DS_CPAD_AXES_LIMIT as f32;
+        gamepad.thumb_ly = (cpad_y_percent * i16::MAX as f32) as i16;
 
         // Auto-adjust C-stick calibration
         if input_state.c_stick.x < self.c_stick_range_x.0 {
@@ -109,7 +106,7 @@ impl VirtualDevice for ViGEmDevice {
             (input_state.c_stick.y - self.c_stick_range_y.0) as f32 / cstick_y_range as f32;
         gamepad.thumb_ry = ((cstick_y_percent - 0.5) * 2.0 * i16::MAX as f32) as i16;
 
-        self.target.update(&self.gamepad)?;
+        self.target.update(&gamepad)?;
 
         Ok(())
     }
