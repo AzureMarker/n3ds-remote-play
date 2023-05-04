@@ -1,5 +1,5 @@
 use crate::virtual_device::{VirtualDevice, VirtualDeviceFactory};
-use n3ds_controller_common::InputState;
+use n3ds_remote_play_common::InputState;
 use std::sync::Arc;
 use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
@@ -13,7 +13,7 @@ mod virtual_device;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
-    println!("Starting n3ds-controller server on 0.0.0.0:3535");
+    println!("Starting n3ds-remote-play server on 0.0.0.0:3535");
     let tcp_listener = TcpListener::bind(("0.0.0.0", 3535))
         .await
         .expect("Failed to bind address");

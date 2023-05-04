@@ -1,7 +1,7 @@
 use crate::virtual_device::VirtualDeviceFactory;
 use crate::VirtualDevice;
 use async_trait::async_trait;
-use n3ds_controller_common::{InputState, KeyPad};
+use n3ds_remote_play_common::{InputState, KeyPad};
 use std::sync::Arc;
 use vigem_client::{TargetId, XButtons, XGamepad, Xbox360Wired};
 

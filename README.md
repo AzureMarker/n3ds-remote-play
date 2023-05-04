@@ -1,5 +1,3 @@
-# n3ds-controller
+# n3ds-remote-play
 
-A project to use the 3DS as a controller for PC games.
-
-This is the first step towards streaming PC games to the 3DS.
+A project to stream PC games to the 3DS.

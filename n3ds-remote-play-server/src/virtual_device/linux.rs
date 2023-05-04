@@ -4,7 +4,7 @@ use input_linux::{
     AbsoluteAxis, AbsoluteEvent, AbsoluteInfo, AbsoluteInfoSetup, EventKind, EventTime, InputId,
     Key, KeyEvent, KeyState, SynchronizeEvent, SynchronizeKind, UInputHandle,
 };
-use n3ds_controller_common::{InputState, KeyPad};
+use n3ds_remote_play_common::{InputState, KeyPad};
 use tokio::fs::{File, OpenOptions};
 
 const PRO_CONTROLLER_AXES_LIMIT: i32 = 32767;

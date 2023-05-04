@@ -215,17 +215,17 @@ dependencies = [
 ]
 
 [[package]]
-name = "n3ds-controller-client"
+name = "n3ds-remote-play-client"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
  "ctru-rs",
- "n3ds-controller-common",
+ "n3ds-remote-play-common",
 ]
 
 [[package]]
-name = "n3ds-controller-common"
+name = "n3ds-remote-play-common"
 version = "0.1.0"
 dependencies = [
  "bincode",
@@ -234,7 +234,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "n3ds-controller-server"
+name = "n3ds-remote-play-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -242,7 +242,7 @@ dependencies = [
  "bincode",
  "input-linux",
  "libc",
- "n3ds-controller-common",
+ "n3ds-remote-play-common",
  "tokio",
  "tokio-serde",
  "tokio-stream",

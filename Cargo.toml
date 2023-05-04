@@ -1,5 +1,5 @@
 [workspace]
-members = ["n3ds-controller-client", "n3ds-controller-server", "n3ds-controller-common"]
+members = ["n3ds-remote-play-client", "n3ds-remote-play-server", "n3ds-remote-play-common"]
 
 [profile.release]
 debug = 1

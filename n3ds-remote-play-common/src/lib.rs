@@ -1,4 +1,4 @@
-//! Common types and functionality for the n3ds-controller project
+//! Common types and functionality for the n3ds-remote-play project
 
 use serde::{Deserialize, Serialize};
 

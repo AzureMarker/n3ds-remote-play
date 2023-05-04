@@ -7,7 +7,7 @@ use ctru::services::ir_user::{CirclePadProInputResponse, IrDeviceId, IrUser};
 use ctru::services::soc::Soc;
 use ctru::services::srv::HandleExt;
 use ctru::services::{Apt, Hid};
-use n3ds_controller_common::{CStick, CirclePad, InputState};
+use n3ds_remote_play_common::{CStick, CirclePad, InputState};
 use std::io::Write;
 use std::net::{Ipv4Addr, TcpStream};
 use std::str::FromStr;
@@ -41,7 +41,7 @@ fn main() {
     // on New 3DS causes ir:USER to not work.
     let hid = Hid::init().expect("Couldn't obtain HID controller");
 
-    println!("Enter the n3ds-controller server IP");
+    println!("Enter the n3ds-remote-play server IP");
     let server_ip = match get_server_ip() {
         Some(server_ip) => server_ip,
         None => return,
@@ -210,7 +210,7 @@ fn main() {
 
         let circle_pad_pos = circle_position.get();
         let input_state = InputState {
-            key_pad: n3ds_controller_common::KeyPad::from_bits_truncate(keys_down_or_held.bits()),
+            key_pad: n3ds_remote_play_common::KeyPad::from_bits_truncate(keys_down_or_held.bits()),
             circle_pad: CirclePad {
                 x: circle_pad_pos.0,
                 y: circle_pad_pos.1,

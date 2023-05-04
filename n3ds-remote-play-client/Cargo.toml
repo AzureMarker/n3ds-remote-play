@@ -1,13 +1,13 @@
 [package]
-name = "n3ds-controller-client"
+name = "n3ds-remote-play-client"
 version = "0.1.0"
 edition = "2021"
 authors = ["Mark Drobnak <mark.drobnak@gmail.com>"]
-description = "Use the 3DS as a controller for PC games. This is the client side which runs on the 3DS."
+description = "Stream PC games to your 3DS. This is the client side which runs on the 3DS."
 
 [dependencies]
 anyhow = "1.0"
 bincode = "1.3"
 ctru-rs = { git = "https://github.com/rust3ds/ctru-rs" }
 
-n3ds-controller-common = { path = "../n3ds-controller-common" }
+n3ds-remote-play-common = { path = "../n3ds-remote-play-common" }

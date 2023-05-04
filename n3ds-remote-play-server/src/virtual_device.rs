@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use n3ds_controller_common::InputState;
+use n3ds_remote_play_common::InputState;
 
 #[cfg(target_os = "linux")]
 mod linux;
