@@ -9,6 +9,9 @@ description = "Stream PC games to your 3DS. This is the server side which runs o
 anyhow = "1.0"
 async-trait = "0.1"
 bincode = "1.3"
+futures = "0.3"
+fast_image_resize = "2.7"
+scrap = "0.5"
 tokio = { version = "1.18", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-serde = { version = "0.8", features = ["bincode"] }
