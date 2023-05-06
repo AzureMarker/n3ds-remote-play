@@ -1,5 +1,8 @@
+use std::fs::File;
+use std::io::BufWriter;
 use crate::virtual_device::{VirtualDevice, VirtualDeviceFactory};
 use futures::{SinkExt, StreamExt};
+use image::buffer::ConvertBuffer;
 use n3ds_remote_play_common::InputState;
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -8,7 +11,7 @@ use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
 use tokio::sync::oneshot::error::TryRecvError;
-use tokio::task::spawn_local;
+use tokio::task::{spawn_local, LocalSet};
 use tokio_serde::formats::SymmetricalBincode;
 use tokio_serde::SymmetricallyFramed;
 use tokio_stream::wrappers::TcpListenerStream;
@@ -16,16 +19,20 @@ use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
 
 mod virtual_device;
 
-// fn main() {
-//     tokio::runtime::Builder::new_current_thread()
-//         .enable_all()
-//         .build()
-//         .unwrap()
-//         .block_on()
-// }
+const N3DS_TOP_WIDTH: u32 = 400;
+const N3DS_TOP_HEIGHT: u32 = 240;
 
-#[tokio::main(flavor = "current_thread")]
-async fn main() {
+fn main() {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let local_set = LocalSet::new();
+
+    local_set.block_on(&runtime, async_main());
+}
+
+async fn async_main() {
     println!("Starting n3ds-remote-play server on 0.0.0.0:3535");
     let tcp_listener = TcpListener::bind(("0.0.0.0", 3535))
         .await
@@ -82,11 +89,20 @@ async fn handle_connection(tcp_stream: TcpStream, device_factory: Arc<impl Virtu
 
     let display = scrap::Display::primary().unwrap();
     let mut display_capturer = scrap::Capturer::new(display).unwrap();
+    let (start_sender, start_receiver) = tokio::sync::oneshot::channel();
+    let mut start_sender = Some(start_sender);
     let (exit_sender, mut exit_receiver) = tokio::sync::oneshot::channel();
     let display_task_handle = spawn_local(async move {
         let width = NonZeroU32::new(display_capturer.width() as u32).unwrap();
         let height = NonZeroU32::new(display_capturer.height() as u32).unwrap();
         let mut resizer = fast_image_resize::Resizer::new(fast_image_resize::ResizeAlg::Nearest);
+
+        // Wait for the 3DS to connect
+        if let Err(e) = start_receiver.await {
+            eprintln!("Got an error in display task while waiting for 3DS to start: {e}");
+            return;
+        }
+        println!("Starting to send frames");
 
         loop {
             match exit_receiver.try_recv() {
@@ -99,12 +115,17 @@ async fn handle_connection(tcp_stream: TcpStream, device_factory: Arc<impl Virtu
 
             match display_capturer.frame() {
                 Ok(frame) => {
+                    let original_frame = image::RgbaImage::from_vec(width.get(), height.get(), frame.to_vec()).unwrap();
+                    let mut tmp_original_file = BufWriter::new(File::create("test-original.png").unwrap());
+                    original_frame.write_to(&mut tmp_original_file, image::ImageOutputFormat::Png).unwrap();
+
+                    // First resize the image to fit the 3DS screen
                     let frame_view = fast_image_resize::DynamicImageView::U8x4(
                         fast_image_resize::ImageView::from_buffer(width, height, &frame).unwrap(),
                     );
                     let mut resized_frame = fast_image_resize::Image::new(
-                        NonZeroU32::new(400).unwrap(),
-                        NonZeroU32::new(240).unwrap(),
+                        NonZeroU32::new(N3DS_TOP_WIDTH).unwrap(),
+                        NonZeroU32::new(N3DS_TOP_HEIGHT).unwrap(),
                         fast_image_resize::PixelType::U8x4,
                     );
 
@@ -112,14 +133,33 @@ async fn handle_connection(tcp_stream: TcpStream, device_factory: Arc<impl Virtu
                         .resize(&frame_view, &mut resized_frame.view_mut())
                         .unwrap();
 
-                    output_stream.send(resized_frame.into_vec()).await.unwrap();
+                    // Convert from BGRA to BGR and rotate since the 3DS top screen is actually in portrait.
+                    let resized_frame = image::RgbaImage::from_vec(
+                        N3DS_TOP_WIDTH,
+                        N3DS_TOP_HEIGHT,
+                        resized_frame.into_vec(),
+                    )
+                    .unwrap();
+                    let resized_frame_bgr: image::RgbImage = resized_frame.convert();
+                    let rotated_frame = image::imageops::rotate270(&resized_frame_bgr);
+                    let mut tmp_file = BufWriter::new(File::create("test.png").unwrap());
+                    rotated_frame.write_to(&mut tmp_file, image::ImageOutputFormat::Png).unwrap();
 
-                    // Sleep to limit the frame rate (10 fps for now)
+                    // Send frame to the 3DS
+                    if let Err(e) = output_stream.send(rotated_frame.into_vec()).await {
+                        eprintln!("Got error in display task while sending frame: {e}");
+                        if e.kind() == std::io::ErrorKind::ConnectionReset {
+                            break;
+                        }
+                    }
+                    println!("Sent frame");
+
+                    // Sleep to limit the frame rate (1 fps for now)
                     select! {
-                        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                        _ = tokio::time::sleep(Duration::from_millis(1000)) => {}
                         _ = &mut exit_receiver => {
                             // Regardless of the result (Ok or Err) we should exit
-                            break
+                            break;
                         }
                     }
                 }
@@ -138,6 +178,11 @@ async fn handle_connection(tcp_stream: TcpStream, device_factory: Arc<impl Virtu
     println!("Spawned display capture task");
 
     while let Some(input_result) = input_stream.next().await {
+        // Start sending frames
+        if let Some(sender) = start_sender.take() {
+            let _ = sender.send(());
+        }
+
         match input_result {
             Ok(input_state) => {
                 // println!("[{peer_addr}] {input_state:?}");
@@ -153,6 +198,6 @@ async fn handle_connection(tcp_stream: TcpStream, device_factory: Arc<impl Virtu
     }
 
     println!("Closing connection with [{peer_addr}]");
-    exit_sender.send(()).unwrap();
+    let _ = exit_sender.send(());
     display_task_handle.await.unwrap();
 }
