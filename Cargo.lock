@@ -565,6 +565,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "ctru-rs",
+ "ctru-sys",
  "n3ds-remote-play-common",
 ]
 

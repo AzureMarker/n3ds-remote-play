@@ -9,5 +9,6 @@ description = "Stream PC games to your 3DS. This is the client side which runs o
 anyhow = "1.0"
 bincode = "1.3"
 ctru-rs = { git = "https://github.com/rust3ds/ctru-rs.git", branch = "feature/ir-user" }
+ctru-sys = { git = "https://github.com/rust3ds/ctru-rs.git", branch = "feature/ir-user" }
 
 n3ds-remote-play-common = { path = "../n3ds-remote-play-common" }
