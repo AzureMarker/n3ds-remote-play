@@ -141,7 +141,7 @@ async fn handle_connection(tcp_stream: TcpStream, device_factory: Arc<impl Virtu
                     )
                     .unwrap();
                     let resized_frame_bgr: image::RgbImage = resized_frame.convert();
-                    let rotated_frame = image::imageops::rotate270(&resized_frame_bgr);
+                    let rotated_frame = image::imageops::rotate90(&resized_frame_bgr);
                     let mut tmp_file = BufWriter::new(File::create("test.png").unwrap());
                     rotated_frame.write_to(&mut tmp_file, image::ImageOutputFormat::Png).unwrap();
 
@@ -154,9 +154,9 @@ async fn handle_connection(tcp_stream: TcpStream, device_factory: Arc<impl Virtu
                     }
                     println!("Sent frame");
 
-                    // Sleep to limit the frame rate (1 fps for now)
+                    // Sleep to limit the frame rate (10 fps for now)
                     select! {
-                        _ = tokio::time::sleep(Duration::from_millis(1000)) => {}
+                        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
                         _ = &mut exit_receiver => {
                             // Regardless of the result (Ok or Err) we should exit
                             break;
@@ -165,7 +165,7 @@ async fn handle_connection(tcp_stream: TcpStream, device_factory: Arc<impl Virtu
                 }
                 Err(e) => {
                     if e.kind() == std::io::ErrorKind::WouldBlock {
-                        eprintln!("Got a WouldBlock in display thread (unexpected but OK)");
+                        tokio::task::yield_now().await;
                         continue;
                     }
 
