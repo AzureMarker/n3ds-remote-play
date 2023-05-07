@@ -12,7 +12,7 @@ use n3ds_remote_play_common::{CStick, CirclePad, InputState};
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, TcpStream};
 use std::str::FromStr;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 const PACKET_INFO_SIZE: usize = 8;
 const MAX_PACKET_SIZE: usize = 32;
@@ -44,11 +44,12 @@ fn main() {
     // on New 3DS causes ir:USER to not work.
     let mut hid = Hid::new().expect("Couldn't obtain HID controller");
 
-    println!("Enter the n3ds-remote-play server IP");
-    let server_ip = match get_server_ip() {
-        Some(server_ip) => server_ip,
-        None => return,
-    };
+    // println!("Enter the n3ds-remote-play server IP");
+    // let server_ip = match get_server_ip() {
+    //     Some(server_ip) => server_ip,
+    //     None => return,
+    // };
+    let server_ip = "192.168.81.82";
 
     let mut connection =
         TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
@@ -170,6 +171,7 @@ fn main() {
     // Main loop
     let mut frame = None;
     let mut frame_filled_bytes = 0;
+    let mut frame_read_start = Instant::now();
     while apt.main_loop() {
         hid.scan_input();
 
@@ -185,10 +187,12 @@ fn main() {
             let frame_size = u32::from_be_bytes(packet_size_buf);
             println!("Got frame size: {frame_size}");
             frame = Some(vec![0; frame_size as usize]);
+            frame_read_start = Instant::now();
         }
 
         // Read the frame
         if let Some(frame_bytes) = &mut frame {
+            let mut sleep_count = 0;
             while frame_filled_bytes != frame_bytes.len() {
                 match connection.read(&mut frame_bytes[frame_filled_bytes..]) {
                     Ok(bytes_read) => {
@@ -198,17 +202,23 @@ fn main() {
                     Err(e) => {
                         if e.kind() == std::io::ErrorKind::WouldBlock {
                             // println!("Pausing frame read to wait for network");
-                            break;
+                            // break;
+                            sleep_count += 1;
+                            std::thread::sleep(Duration::from_millis(1));
+                            continue;
                         }
                         panic!("{e}");
                     }
                 }
             }
+            println!("Slept {sleep_count} times");
 
             if frame_filled_bytes == frame_bytes.len() {
-                println!("Finished reading frame");
+                let frame_read_duration = frame_read_start.elapsed();
+                println!("Finished reading frame. Duration: {frame_read_duration:?}");
 
                 // Write the frame
+                let frame_write_start = Instant::now();
                 unsafe {
                     gfx.top_screen
                         .borrow_mut()
@@ -216,9 +226,14 @@ fn main() {
                         .ptr
                         .copy_from(frame_bytes.as_ptr(), frame_bytes.len());
                 }
+                let frame_flush_start = Instant::now();
                 let mut top_screen = gfx.top_screen.borrow_mut();
                 top_screen.flush_buffers();
                 // top_screen.swap_buffers();
+
+                let frame_flush_duration =  frame_flush_start.elapsed();
+                let frame_write_duration =  frame_flush_start.duration_since(frame_write_start);
+                println!("Write: {frame_write_duration:?}, Flush: {frame_flush_duration:?}");
 
                 frame = None;
                 frame_filled_bytes = 0;
