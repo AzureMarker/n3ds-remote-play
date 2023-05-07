@@ -6,7 +6,7 @@ use image::buffer::ConvertBuffer;
 use n3ds_remote_play_common::InputState;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::BufReader;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::select;
@@ -115,9 +115,10 @@ async fn handle_connection(tcp_stream: TcpStream, device_factory: Arc<impl Virtu
 
             match display_capturer.frame() {
                 Ok(frame) => {
-                    let original_frame = image::RgbaImage::from_vec(width.get(), height.get(), frame.to_vec()).unwrap();
-                    let mut tmp_original_file = BufWriter::new(File::create("test-original.png").unwrap());
-                    original_frame.write_to(&mut tmp_original_file, image::ImageOutputFormat::Png).unwrap();
+                    let frame_processing_start = Instant::now();
+                    // let original_frame = image::RgbaImage::from_vec(width.get(), height.get(), frame.to_vec()).unwrap();
+                    // let mut tmp_original_file = BufWriter::new(File::create("test-original.png").unwrap());
+                    // original_frame.write_to(&mut tmp_original_file, image::ImageOutputFormat::Png).unwrap();
 
                     // First resize the image to fit the 3DS screen
                     let frame_view = fast_image_resize::DynamicImageView::U8x4(
@@ -142,8 +143,9 @@ async fn handle_connection(tcp_stream: TcpStream, device_factory: Arc<impl Virtu
                     .unwrap();
                     let resized_frame_bgr: image::RgbImage = resized_frame.convert();
                     let rotated_frame = image::imageops::rotate90(&resized_frame_bgr);
-                    let mut tmp_file = BufWriter::new(File::create("test.png").unwrap());
-                    rotated_frame.write_to(&mut tmp_file, image::ImageOutputFormat::Png).unwrap();
+                    // let mut tmp_file = BufWriter::new(File::create("test.png").unwrap());
+                    // rotated_frame.write_to(&mut tmp_file, image::ImageOutputFormat::Png).unwrap();
+                    let frame_processing_end = Instant::now();
 
                     // Send frame to the 3DS
                     if let Err(e) = output_stream.send(rotated_frame.into_vec()).await {
@@ -152,7 +154,10 @@ async fn handle_connection(tcp_stream: TcpStream, device_factory: Arc<impl Virtu
                             break;
                         }
                     }
-                    println!("Sent frame");
+                    let frame_send_end = Instant::now();
+                    let frame_processing_duration = frame_processing_end.duration_since(frame_processing_start);
+                    let frame_send_duration = frame_send_end.duration_since(frame_processing_end);
+                    println!("Sent frame. Processing: {frame_processing_duration:?}, Sending: {frame_send_duration:?}");
 
                     // Sleep to limit the frame rate (10 fps for now)
                     select! {
