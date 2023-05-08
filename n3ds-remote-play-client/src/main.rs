@@ -9,8 +9,8 @@ use ctru::services::soc::Soc;
 use ctru::services::srv::HandleExt;
 use ctru::services::{Apt, Hid};
 use n3ds_remote_play_common::{CStick, CirclePad, InputState};
-use std::io::{Read, Write};
-use std::net::{Ipv4Addr, TcpStream};
+use std::io::Write;
+use std::net::{Ipv4Addr, TcpStream, UdpSocket};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
 
@@ -50,7 +50,7 @@ fn main() {
             return;
         }
     };
-    // let server_ip = Ipv4Addr::new(192, 168, 81, 82);
+    // let server_ip = Ipv4Addr::new(192, 168, 1, 141);
 
     let mut remote_play_client = RemotePlayClient::new(apt, &gfx, ir_user, hid, server_ip)
         .expect("User has canceled client creation");
@@ -65,6 +65,7 @@ struct RemotePlayClient<'gfx> {
     ir_user: IrUser,
     hid: Hid,
     connection: TcpStream,
+    udp_connection: UdpSocket,
     last_cpp_input: CirclePadProInputResponse,
 }
 
@@ -79,6 +80,13 @@ impl<'gfx> RemotePlayClient<'gfx> {
         let connection =
             TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
         connection.set_nonblocking(true).unwrap();
+        let local_address = connection.local_addr().unwrap();
+
+        let udp_connection =
+            UdpSocket::bind(local_address).expect("Failed to listen for UDP connections");
+        udp_connection
+            .connect((server_ip, 3535))
+            .expect("Failed to set up UDP connection to server");
 
         Some(Self {
             apt,
@@ -86,6 +94,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
             ir_user,
             hid,
             connection,
+            udp_connection,
             last_cpp_input: CirclePadProInputResponse::default(),
         })
     }
@@ -113,9 +122,8 @@ impl<'gfx> RemotePlayClient<'gfx> {
             .get_recv_event()
             .expect("Couldn't get ir:USER recv event");
 
-        let mut frame = None;
-        let mut frame_filled_bytes = 0;
-        let mut frame_read_start = Instant::now();
+        let mut udp_recv_buffer = vec![0u8; 1_000_000];
+        let mut frame_read_start;
 
         while self.apt.main_loop() {
             self.hid.scan_input();
@@ -157,64 +165,48 @@ impl<'gfx> RemotePlayClient<'gfx> {
             self.send_input_state(input_state).unwrap();
 
             // Check if we've received a frame from the PC
-            let mut packet_size_buf = [0; 4];
-            if frame.is_none() && self.connection.read_exact(&mut packet_size_buf).is_ok() {
+            frame_read_start = Instant::now();
+            if let Ok(datagram_size) = self.udp_connection.recv(&mut udp_recv_buffer) {
+                let frame_decode_start = Instant::now();
+                println!(
+                    "Got datagram of size {datagram_size} bytes, duration: {:?}",
+                    frame_decode_start.duration_since(frame_read_start)
+                );
+                assert!(datagram_size >= 4);
                 // Read the frame size (should be constant but just in case)
-                let frame_size = u32::from_be_bytes(packet_size_buf);
-                println!("Got frame size: {frame_size}");
-                frame = Some(vec![0; frame_size as usize]);
-                frame_read_start = Instant::now();
-            }
+                let frame_size = u32::from_be_bytes([
+                    udp_recv_buffer[0],
+                    udp_recv_buffer[1],
+                    udp_recv_buffer[2],
+                    udp_recv_buffer[3],
+                ]) as usize;
+                assert!(datagram_size >= (frame_size + 4));
+                let jpeg_frame = &udp_recv_buffer[4..(frame_size + 4)];
+                let frame = jpeg_decoder::Decoder::new(jpeg_frame).decode().unwrap();
+                println!(
+                    "Decoded frame with size: {}, duration: {:?}",
+                    frame.len(),
+                    frame_decode_start.elapsed()
+                );
 
-            // Read the frame
-            if let Some(frame_bytes) = &mut frame {
-                let mut sleep_count = 0;
-                while frame_filled_bytes != frame_bytes.len() {
-                    match self.connection.read(&mut frame_bytes[frame_filled_bytes..]) {
-                        Ok(bytes_read) => {
-                            frame_filled_bytes += bytes_read;
-                            // println!("Added {bytes_read} bytes to frame. Total: {frame_filled_bytes}");
-                        }
-                        Err(e) => {
-                            if e.kind() == std::io::ErrorKind::WouldBlock {
-                                // println!("Pausing frame read to wait for network");
-                                // break;
-                                sleep_count += 1;
-                                std::thread::sleep(Duration::from_millis(1));
-                                continue;
-                            }
-                            panic!("{e}");
-                        }
-                    }
+                // Write the frame
+                let frame_write_start = Instant::now();
+                unsafe {
+                    self.gfx
+                        .top_screen
+                        .borrow_mut()
+                        .raw_framebuffer()
+                        .ptr
+                        .copy_from(frame.as_ptr(), frame.len());
                 }
-                println!("Slept {sleep_count} times");
+                let frame_flush_start = Instant::now();
+                let mut top_screen = self.gfx.top_screen.borrow_mut();
+                top_screen.flush_buffers();
+                // top_screen.swap_buffers();
 
-                if frame_filled_bytes == frame_bytes.len() {
-                    let frame_read_duration = frame_read_start.elapsed();
-                    println!("Finished reading frame. Duration: {frame_read_duration:?}");
-
-                    // Write the frame
-                    let frame_write_start = Instant::now();
-                    unsafe {
-                        self.gfx
-                            .top_screen
-                            .borrow_mut()
-                            .raw_framebuffer()
-                            .ptr
-                            .copy_from(frame_bytes.as_ptr(), frame_bytes.len());
-                    }
-                    let frame_flush_start = Instant::now();
-                    let mut top_screen = self.gfx.top_screen.borrow_mut();
-                    top_screen.flush_buffers();
-                    // top_screen.swap_buffers();
-
-                    let frame_flush_duration = frame_flush_start.elapsed();
-                    let frame_write_duration = frame_flush_start.duration_since(frame_write_start);
-                    println!("Write: {frame_write_duration:?}, Flush: {frame_flush_duration:?}");
-
-                    frame = None;
-                    frame_filled_bytes = 0;
-                }
+                let frame_flush_duration = frame_flush_start.elapsed();
+                let frame_write_duration = frame_flush_start.duration_since(frame_write_start);
+                println!("Write: {frame_write_duration:?}, Flush: {frame_flush_duration:?}");
             }
 
             self.gfx.wait_for_vblank();

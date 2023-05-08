@@ -1,5 +1,3 @@
-use std::fs::File;
-use std::io::BufWriter;
 use crate::virtual_device::{VirtualDevice, VirtualDeviceFactory};
 use futures::{SinkExt, StreamExt};
 use image::buffer::ConvertBuffer;
@@ -7,15 +5,15 @@ use n3ds_remote_play_common::InputState;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::io::BufReader;
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::{TcpListener, TcpStream, UdpSocket};
 use tokio::select;
 use tokio::sync::oneshot::error::TryRecvError;
 use tokio::task::{spawn_local, LocalSet};
 use tokio_serde::formats::SymmetricalBincode;
 use tokio_serde::SymmetricallyFramed;
 use tokio_stream::wrappers::TcpListenerStream;
-use tokio_util::codec::{FramedRead, FramedWrite, LengthDelimitedCodec};
+use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
+use tokio_util::udp::UdpFramed;
 
 mod virtual_device;
 
@@ -38,6 +36,10 @@ async fn async_main() {
         .await
         .expect("Failed to bind address");
     let mut tcp_stream = TcpListenerStream::new(tcp_listener);
+    let udp_socket = UdpSocket::bind(("0.0.0.0", 3535))
+        .await
+        .expect("Failed to bind UDP socket");
+    let udp_socket = Arc::new(udp_socket);
     let device_factory = Arc::new(
         virtual_device::new_device_factory().expect("Failed to create virtual device factory"),
     );
@@ -45,7 +47,11 @@ async fn async_main() {
     while let Some(connection) = tcp_stream.next().await {
         match connection {
             Ok(connection) => {
-                spawn_local(handle_connection(connection, Arc::clone(&device_factory)));
+                spawn_local(handle_connection(
+                    connection,
+                    Arc::clone(&udp_socket),
+                    Arc::clone(&device_factory),
+                ));
             }
             Err(e) => {
                 eprintln!("New connection error: {e}");
@@ -55,7 +61,11 @@ async fn async_main() {
     }
 }
 
-async fn handle_connection(tcp_stream: TcpStream, device_factory: Arc<impl VirtualDeviceFactory>) {
+async fn handle_connection(
+    tcp_stream: TcpStream,
+    udp_socket: Arc<UdpSocket>,
+    device_factory: Arc<impl VirtualDeviceFactory>,
+) {
     let peer_addr = match tcp_stream.peer_addr() {
         Ok(peer_addr) => peer_addr,
         Err(e) => {
@@ -64,9 +74,6 @@ async fn handle_connection(tcp_stream: TcpStream, device_factory: Arc<impl Virtu
         }
     };
     println!("New connection from {peer_addr}");
-
-    let (tcp_reader, tcp_writer) = tcp_stream.into_split();
-    let tcp_reader = BufReader::new(tcp_reader);
 
     let mut device = match device_factory.new_device().await {
         Ok(device) => device,
@@ -78,14 +85,11 @@ async fn handle_connection(tcp_stream: TcpStream, device_factory: Arc<impl Virtu
     println!("Created uinput device");
 
     let mut input_stream = SymmetricallyFramed::new(
-        FramedRead::new(tcp_reader, LengthDelimitedCodec::new()),
+        FramedRead::new(tcp_stream, LengthDelimitedCodec::new()),
         SymmetricalBincode::<InputState>::default(),
     );
-    let mut output_stream = SymmetricallyFramed::new(
-        FramedWrite::new(tcp_writer, LengthDelimitedCodec::new()),
-        SymmetricalBincode::<Vec<u8>>::default(),
-    );
-    println!("Created input and output streams");
+    let mut frame_sink = UdpFramed::new(udp_socket, LengthDelimitedCodec::new());
+    println!("Created input stream and frame sink");
 
     let display = scrap::Display::primary().unwrap();
     let mut display_capturer = scrap::Capturer::new(display).unwrap();
@@ -143,19 +147,30 @@ async fn handle_connection(tcp_stream: TcpStream, device_factory: Arc<impl Virtu
                     .unwrap();
                     let resized_frame_bgr: image::RgbImage = resized_frame.convert();
                     let rotated_frame = image::imageops::rotate90(&resized_frame_bgr);
-                    // let mut tmp_file = BufWriter::new(File::create("test.png").unwrap());
-                    // rotated_frame.write_to(&mut tmp_file, image::ImageOutputFormat::Png).unwrap();
+                    // let mut tmp_file = BufWriter::new(File::create("test.jpeg").unwrap());
+                    // rotated_frame.write_to(&mut tmp_file, image::ImageOutputFormat::Jpeg).unwrap();
+
+                    let mut jpeg_frame = Vec::new();
+                    let mut jpeg_encoder = image::codecs::jpeg::JpegEncoder::new(&mut jpeg_frame);
+                    jpeg_encoder.encode_image(&rotated_frame).unwrap();
+
                     let frame_processing_end = Instant::now();
+                    println!(
+                        "Encoded image with size {} to JPEG with size {}",
+                        rotated_frame.len(),
+                        jpeg_frame.len()
+                    );
 
                     // Send frame to the 3DS
-                    if let Err(e) = output_stream.send(rotated_frame.into_vec()).await {
+                    if let Err(e) = frame_sink.send((jpeg_frame.into(), peer_addr)).await {
                         eprintln!("Got error in display task while sending frame: {e}");
                         if e.kind() == std::io::ErrorKind::ConnectionReset {
                             break;
                         }
                     }
                     let frame_send_end = Instant::now();
-                    let frame_processing_duration = frame_processing_end.duration_since(frame_processing_start);
+                    let frame_processing_duration =
+                        frame_processing_end.duration_since(frame_processing_start);
                     let frame_send_duration = frame_send_end.duration_since(frame_processing_end);
                     println!("Sent frame. Processing: {frame_processing_duration:?}, Sending: {frame_send_duration:?}");
 
