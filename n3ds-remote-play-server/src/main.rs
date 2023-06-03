@@ -1,5 +1,5 @@
 use crate::virtual_device::{VirtualDevice, VirtualDeviceFactory};
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use image::buffer::ConvertBuffer;
 use n3ds_remote_play_common::InputState;
 use std::num::NonZeroU32;
@@ -13,7 +13,6 @@ use tokio_serde::formats::SymmetricalBincode;
 use tokio_serde::SymmetricallyFramed;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
-use tokio_util::udp::UdpFramed;
 
 mod virtual_device;
 
@@ -88,8 +87,7 @@ async fn handle_connection(
         FramedRead::new(tcp_stream, LengthDelimitedCodec::new()),
         SymmetricalBincode::<InputState>::default(),
     );
-    let mut frame_sink = UdpFramed::new(udp_socket, LengthDelimitedCodec::new());
-    println!("Created input stream and frame sink");
+    println!("Created input stream");
 
     let display = scrap::Display::primary().unwrap();
     let mut display_capturer = scrap::Capturer::new(display).unwrap();
@@ -107,6 +105,8 @@ async fn handle_connection(
             return;
         }
         println!("Starting to send frames");
+
+        let mut next_frame_time = Instant::now() + Duration::from_millis(100);
 
         loop {
             match exit_receiver.try_recv() {
@@ -151,32 +151,36 @@ async fn handle_connection(
                     // rotated_frame.write_to(&mut tmp_file, image::ImageOutputFormat::Jpeg).unwrap();
 
                     let mut jpeg_frame = Vec::new();
-                    let mut jpeg_encoder = image::codecs::jpeg::JpegEncoder::new(&mut jpeg_frame);
+                    let mut jpeg_encoder =
+                        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_frame, 50);
                     jpeg_encoder.encode_image(&rotated_frame).unwrap();
 
                     let frame_processing_end = Instant::now();
-                    println!(
-                        "Encoded image with size {} to JPEG with size {}",
-                        rotated_frame.len(),
-                        jpeg_frame.len()
-                    );
+                    // println!(
+                    //     "Encoded image with size {} to JPEG with size {}",
+                    //     rotated_frame.len(),
+                    //     jpeg_frame.len()
+                    // );
 
                     // Send frame to the 3DS
-                    if let Err(e) = frame_sink.send((jpeg_frame.into(), peer_addr)).await {
+                    if let Err(e) = udp_socket.send_to(&jpeg_frame, peer_addr).await {
                         eprintln!("Got error in display task while sending frame: {e}");
                         if e.kind() == std::io::ErrorKind::ConnectionReset {
                             break;
                         }
                     }
                     let frame_send_end = Instant::now();
-                    let frame_processing_duration =
-                        frame_processing_end.duration_since(frame_processing_start);
+                    let frame_processing_duration = frame_processing_end
+                        .duration_since(frame_processing_start)
+                        .as_millis();
                     let frame_send_duration = frame_send_end.duration_since(frame_processing_end);
-                    println!("Sent frame. Processing: {frame_processing_duration:?}, Sending: {frame_send_duration:?}");
+                    println!("Sent frame with size {:5}. Processing: {frame_processing_duration:3?}ms, Sending: {frame_send_duration:9?}", jpeg_frame.len());
 
                     // Sleep to limit the frame rate (10 fps for now)
                     select! {
-                        _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+                        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_frame_time)) => {
+                            next_frame_time += Duration::from_millis(100);
+                        }
                         _ = &mut exit_receiver => {
                             // Regardless of the result (Ok or Err) we should exit
                             break;
@@ -197,22 +201,33 @@ async fn handle_connection(
     });
     println!("Spawned display capture task");
 
-    while let Some(input_result) = input_stream.next().await {
-        // Start sending frames
-        if let Some(sender) = start_sender.take() {
-            let _ = sender.send(());
-        }
-
-        match input_result {
-            Ok(input_state) => {
-                // println!("[{peer_addr}] {input_state:?}");
-                device.emit_input(input_state).unwrap();
-            }
-            Err(e) => {
-                eprintln!("Error while reading stream: {e}");
-                if e.kind() == std::io::ErrorKind::ConnectionReset {
+    loop {
+        select! {
+            stream_item = input_stream.next() => {
+                let Some(input_result) = stream_item else {
                     break;
+                };
+
+                if let Some(sender) = start_sender.take() {
+                    let _ = sender.send(());
                 }
+
+                match input_result {
+                    Ok(input_state) => {
+                        // println!("[{peer_addr}] {input_state:?}");
+                        device.emit_input(input_state).unwrap();
+                    }
+                    Err(e) => {
+                        eprintln!("Error while reading stream: {e}");
+                        if e.kind() == std::io::ErrorKind::ConnectionReset {
+                            break;
+                        }
+                    }
+                }
+            }
+            _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
+                eprintln!("Timed out while waiting for [{peer_addr}] to send an input packet (5 sec)");
+                break;
             }
         }
     }

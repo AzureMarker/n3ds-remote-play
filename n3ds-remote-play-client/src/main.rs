@@ -84,6 +84,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
 
         let udp_connection =
             UdpSocket::bind(local_address).expect("Failed to listen for UDP connections");
+        // udp_connection.set_nonblocking(true).unwrap();
         udp_connection
             .connect((server_ip, 3535))
             .expect("Failed to set up UDP connection to server");
@@ -122,7 +123,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
             .get_recv_event()
             .expect("Couldn't get ir:USER recv event");
 
-        let mut udp_recv_buffer = vec![0u8; 1_000_000];
+        let mut udp_recv_buffer = vec![0u8; 70_000];
         let mut frame_read_start;
 
         while self.apt.main_loop() {
@@ -166,28 +167,20 @@ impl<'gfx> RemotePlayClient<'gfx> {
 
             // Check if we've received a frame from the PC
             frame_read_start = Instant::now();
-            if let Ok(datagram_size) = self.udp_connection.recv(&mut udp_recv_buffer) {
+            let udp_result = self.udp_connection.recv(&mut udp_recv_buffer);
+            if let Ok(datagram_size) = udp_result {
                 let frame_decode_start = Instant::now();
-                println!(
-                    "Got datagram of size {datagram_size} bytes, duration: {:?}",
-                    frame_decode_start.duration_since(frame_read_start)
-                );
-                assert!(datagram_size >= 4);
-                // Read the frame size (should be constant but just in case)
-                let frame_size = u32::from_be_bytes([
-                    udp_recv_buffer[0],
-                    udp_recv_buffer[1],
-                    udp_recv_buffer[2],
-                    udp_recv_buffer[3],
-                ]) as usize;
-                assert!(datagram_size >= (frame_size + 4));
-                let jpeg_frame = &udp_recv_buffer[4..(frame_size + 4)];
+                // println!(
+                //     "Got datagram of size {datagram_size} bytes, duration: {:?}",
+                //     frame_decode_start.duration_since(frame_read_start)
+                // );
+                let jpeg_frame = &udp_recv_buffer[..datagram_size];
                 let frame = jpeg_decoder::Decoder::new(jpeg_frame).decode().unwrap();
-                println!(
-                    "Decoded frame with size: {}, duration: {:?}",
-                    frame.len(),
-                    frame_decode_start.elapsed()
-                );
+                // println!(
+                //     "Decoded frame with size: {}, duration: {:?}",
+                //     frame.len(),
+                //     frame_decode_start.elapsed()
+                // );
 
                 // Write the frame
                 let frame_write_start = Instant::now();
@@ -206,7 +199,21 @@ impl<'gfx> RemotePlayClient<'gfx> {
 
                 let frame_flush_duration = frame_flush_start.elapsed();
                 let frame_write_duration = frame_flush_start.duration_since(frame_write_start);
-                println!("Write: {frame_write_duration:?}, Flush: {frame_flush_duration:?}");
+                // println!("Write: {frame_write_duration:?}, Flush: {frame_flush_duration:?}");
+                println!(
+                    "Datagram size: {datagram_size:5}, Recv: {:3?}ms, Proc: {:3?}ms",
+                    frame_decode_start
+                        .duration_since(frame_read_start)
+                        .as_millis(),
+                    frame_decode_start.elapsed().as_millis()
+                );
+            } else if let Err(e) = udp_result {
+                if e.kind() != std::io::ErrorKind::WouldBlock {
+                    eprintln!(
+                        "Error while checking for UDP packet: {e}, kind = {}",
+                        e.kind()
+                    );
+                }
             }
 
             self.gfx.wait_for_vblank();
@@ -258,6 +265,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
             let keys_down_or_held = self.hid.keys_down().union(self.hid.keys_held());
 
             if keys_down_or_held.contains(KeyPad::B) {
+                println!("Canceling New 3DS / Circle Pad Pro detection");
                 break;
             }
 
