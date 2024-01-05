@@ -16,6 +16,7 @@ use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
 
 mod virtual_device;
 
+const CLIENT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const N3DS_TOP_WIDTH: u32 = 400;
 const N3DS_TOP_HEIGHT: u32 = 240;
 
@@ -225,8 +226,8 @@ async fn handle_connection(
                     }
                 }
             }
-            _ = tokio::time::sleep(tokio::time::Duration::from_secs(5)) => {
-                eprintln!("Timed out while waiting for [{peer_addr}] to send an input packet (5 sec)");
+            _ = tokio::time::sleep(CLIENT_CONNECTION_TIMEOUT) => {
+                eprintln!("Timed out while waiting for [{peer_addr}] to send an input packet ({CLIENT_CONNECTION_TIMEOUT:?})");
                 break;
             }
         }
