@@ -1,18 +1,18 @@
 use bincode::Options;
-use ctru::applets::swkbd::{self, Swkbd};
 use ctru::console::Console;
-use ctru::prelude::Gfx;
+use ctru::prelude::{Apt, Gfx, Hid};
 use ctru::services::gfx::{Flush, Screen, Swap};
 use ctru::services::hid::KeyPad;
-use ctru::services::ir_user::{CirclePadProInputResponse, IrDeviceId, IrUser};
+use ctru::services::ir_user::{CirclePadProInputResponse, ConnectionStatus, IrDeviceId, IrUser};
 use ctru::services::soc::Soc;
-use ctru::services::srv::HandleExt;
-use ctru::services::{Apt, Hid};
 use n3ds_remote_play_common::{CStick, CirclePad, InputState};
 use std::io::Write;
 use std::net::{Ipv4Addr, TcpStream, UdpSocket};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
+use ctru::applets::swkbd;
+use ctru::applets::swkbd::SoftwareKeyboard;
+use ctru::services::svc::HandleExt;
 
 const PACKET_INFO_SIZE: usize = 8;
 const MAX_PACKET_SIZE: usize = 32;
@@ -22,7 +22,6 @@ const CPP_CONNECTION_POLLING_PERIOD_MS: u8 = 0x08;
 const CPP_POLLING_PERIOD_MS: u8 = 0x32;
 
 fn main() {
-    ctru::use_panic_handler();
     let gfx = Gfx::new().expect("Couldn't obtain GFX controller");
     let apt = Apt::new().expect("Couldn't obtain APT controller");
     let _soc = Soc::new().expect("Couldn't initialize networking");
@@ -42,7 +41,7 @@ fn main() {
     let hid = Hid::new().expect("Couldn't obtain HID controller");
 
     println!("Enter the n3ds-remote-play server IP");
-    let server_ip = match get_server_ip() {
+    let server_ip = match get_server_ip(&apt, &gfx) {
         Some(server_ip) => server_ip,
         None => {
             println!("Cancel was clicked, exiting in 5 seconds...");
@@ -101,7 +100,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
     }
 
     fn send_input_state(&mut self, state: InputState) -> anyhow::Result<()> {
-        // println!("Sending {state:?}");
+        println!("Sending {state:?}");
 
         let bincode_options = bincode::DefaultOptions::new();
         let state_size: u32 = bincode_options.serialized_size(&state)?.try_into()?;
@@ -227,7 +226,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
             return;
         }
 
-        let packets = self.ir_user.get_packets();
+        let packets = self.ir_user.get_packets().expect("Failed to get packets");
         let packet_count = packets.len();
         let Some(packet) = packets.last() else { panic!("No packets found") };
         let cpp_input = CirclePadProInputResponse::try_from(packet)
@@ -293,7 +292,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
                         }
                     }
 
-                    if self.ir_user.get_status_info().connection_status == 2 {
+                    if self.ir_user.get_status_info().connection_status == ConnectionStatus::Connected {
                         println!("Connected!");
                         break;
                     }
@@ -334,7 +333,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
 
                     if recv_event_result.is_ok() {
                         println!("Got first packet from CPP");
-                        let packets = self.ir_user.get_packets();
+                        let packets = self.ir_user.get_packets().expect("Failed to get packets");
                         let packet_count = packets.len();
                         let Some(packet) = packets.last() else { panic!("No packets found") };
                         let cpp_input = CirclePadProInputResponse::try_from(packet)
@@ -365,11 +364,11 @@ impl<'gfx> RemotePlayClient<'gfx> {
     }
 }
 
-fn get_server_ip() -> Option<Ipv4Addr> {
-    let mut keyboard = Swkbd::default();
+fn get_server_ip(apt: &Apt, gfx: &Gfx) -> Option<Ipv4Addr> {
+    let mut keyboard = SoftwareKeyboard::default();
 
     loop {
-        match keyboard.get_string(20) {
+        match keyboard.get_string(20, apt, gfx) {
             Ok((input, swkbd::Button::Right)) => {
                 // Clicked "OK"
                 let ip_addr = match Ipv4Addr::from_str(&input) {

@@ -1,15 +1,18 @@
+cargo-features = ["per-package-target"]
+
 [package]
 name = "n3ds-remote-play-client"
 version = "0.1.0"
 edition = "2021"
 authors = ["Mark Drobnak <mark.drobnak@gmail.com>"]
 description = "Stream PC games to your 3DS. This is the client side which runs on the 3DS."
+forced-target = "armv6k-nintendo-3ds"
 
 [dependencies]
 anyhow = "1.0"
 bincode = "1.3"
-ctru-rs = { git = "https://github.com/rust3ds/ctru-rs.git", branch = "feature/ir-user" }
-ctru-sys = { git = "https://github.com/rust3ds/ctru-rs.git", branch = "feature/ir-user" }
+ctru-rs = { git = "https://github.com/rust3ds/ctru-rs.git" }
+ctru-sys = { git = "https://github.com/rust3ds/ctru-rs.git" }
 jpeg-decoder = "0.3"
 
 n3ds-remote-play-common = { path = "../n3ds-remote-play-common" }
