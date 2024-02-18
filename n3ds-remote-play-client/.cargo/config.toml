@@ -1,0 +1,3 @@
+[build]
+target = "armv6k-nintendo-3ds"
+rsutflags = ["-L/opt/devkitpro/libctru/lib", "-lctrud"]
