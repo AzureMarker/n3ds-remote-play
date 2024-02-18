@@ -1,18 +1,18 @@
 use bincode::Options;
+use ctru::applets::swkbd;
+use ctru::applets::swkbd::SoftwareKeyboard;
 use ctru::console::Console;
 use ctru::prelude::{Apt, Gfx, Hid};
 use ctru::services::gfx::{Flush, Screen, Swap};
 use ctru::services::hid::KeyPad;
 use ctru::services::ir_user::{CirclePadProInputResponse, ConnectionStatus, IrDeviceId, IrUser};
 use ctru::services::soc::Soc;
+use ctru::services::svc::HandleExt;
 use n3ds_remote_play_common::{CStick, CirclePad, InputState};
 use std::io::Write;
 use std::net::{Ipv4Addr, TcpStream, UdpSocket};
 use std::str::FromStr;
 use std::time::{Duration, Instant};
-use ctru::applets::swkbd;
-use ctru::applets::swkbd::SoftwareKeyboard;
-use ctru::services::svc::HandleExt;
 
 const PACKET_INFO_SIZE: usize = 8;
 const MAX_PACKET_SIZE: usize = 32;
@@ -228,7 +228,9 @@ impl<'gfx> RemotePlayClient<'gfx> {
 
         let packets = self.ir_user.get_packets().expect("Failed to get packets");
         let packet_count = packets.len();
-        let Some(packet) = packets.last() else { panic!("No packets found") };
+        let Some(packet) = packets.last() else {
+            panic!("No packets found")
+        };
         let cpp_input = CirclePadProInputResponse::try_from(packet)
             .expect("Failed to parse CPP response from IR packet");
         self.last_cpp_input = cpp_input;
@@ -292,7 +294,9 @@ impl<'gfx> RemotePlayClient<'gfx> {
                         }
                     }
 
-                    if self.ir_user.get_status_info().connection_status == ConnectionStatus::Connected {
+                    if self.ir_user.get_status_info().connection_status
+                        == ConnectionStatus::Connected
+                    {
                         println!("Connected!");
                         break;
                     }
@@ -335,7 +339,9 @@ impl<'gfx> RemotePlayClient<'gfx> {
                         println!("Got first packet from CPP");
                         let packets = self.ir_user.get_packets().expect("Failed to get packets");
                         let packet_count = packets.len();
-                        let Some(packet) = packets.last() else { panic!("No packets found") };
+                        let Some(packet) = packets.last() else {
+                            panic!("No packets found")
+                        };
                         let cpp_input = CirclePadProInputResponse::try_from(packet)
                             .expect("Failed to parse CPP response from IR packet");
                         self.last_cpp_input = cpp_input;
