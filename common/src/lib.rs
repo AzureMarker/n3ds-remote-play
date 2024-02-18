@@ -26,7 +26,8 @@ bitflags::bitflags! {
     /// inputs on the 3DS.
     ///
     /// This is a modified copy of `KeyPad` from ctru-rs.
-    #[derive(Serialize, Deserialize, Default)]
+    #[derive(Serialize, Deserialize, Copy, Clone, Debug, Default)]
+    #[serde(transparent)]
     pub struct KeyPad: u32 {
         const KEY_A             = 1u32 << 0;
         const KEY_B             = 1u32 << 1;
