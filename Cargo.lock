@@ -671,7 +671,6 @@ dependencies = [
 name = "n3ds-remote-play-common"
 version = "0.1.0"
 dependencies = [
- "bincode",
  "bitflags 2.10.0",
  "serde",
 ]
@@ -682,7 +681,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "bincode",
  "fast_image_resize",
  "futures",
  "image",

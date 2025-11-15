@@ -3,7 +3,7 @@ cargo-features = ["per-package-target"]
 [package]
 name = "n3ds-remote-play-client"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors = ["Mark Drobnak <mark.drobnak@gmail.com>"]
 description = "Stream PC games to your 3DS. This is the client side which runs on the 3DS."
 forced-target = "armv6k-nintendo-3ds"

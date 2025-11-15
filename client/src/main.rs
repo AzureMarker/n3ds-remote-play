@@ -206,13 +206,13 @@ impl<'gfx> RemotePlayClient<'gfx> {
                         .as_millis(),
                     frame_decode_start.elapsed().as_millis()
                 );
-            } else if let Err(e) = udp_result {
-                if e.kind() != std::io::ErrorKind::WouldBlock {
-                    eprintln!(
-                        "Error while checking for UDP packet: {e}, kind = {}",
-                        e.kind()
-                    );
-                }
+            } else if let Err(e) = udp_result
+                && e.kind() != std::io::ErrorKind::WouldBlock
+            {
+                eprintln!(
+                    "Error while checking for UDP packet: {e}, kind = {}",
+                    e.kind()
+                );
             }
 
             self.gfx.wait_for_vblank();
@@ -288,10 +288,9 @@ impl<'gfx> RemotePlayClient<'gfx> {
                     // Wait for the connection to establish
                     if let Err(e) =
                         connection_status_event.wait_for_event(Duration::from_millis(100))
+                        && !e.is_timeout()
                     {
-                        if !e.is_timeout() {
-                            panic!("Couldn't initialize circle pad pro connection: {e}");
-                        }
+                        panic!("Couldn't initialize circle pad pro connection: {e}");
                     }
 
                     if self.ir_user.get_status_info().connection_status
@@ -309,10 +308,9 @@ impl<'gfx> RemotePlayClient<'gfx> {
                     // Wait for the disconnect to go through
                     if let Err(e) =
                         connection_status_event.wait_for_event(Duration::from_millis(100))
+                        && !e.is_timeout()
                     {
-                        if !e.is_timeout() {
-                            panic!("Couldn't initialize circle pad pro connection: {e}");
-                        }
+                        panic!("Couldn't initialize circle pad pro connection: {e}");
                     }
                 }
 
