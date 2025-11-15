@@ -374,7 +374,7 @@ fn get_server_ip(apt: &Apt, gfx: &Gfx) -> Option<Ipv4Addr> {
     let mut keyboard = SoftwareKeyboard::default();
 
     loop {
-        match keyboard.get_string(20, apt, gfx) {
+        match keyboard.launch(apt, gfx) {
             Ok((input, swkbd::Button::Right)) => {
                 // Clicked "OK"
                 let ip_addr = match Ipv4Addr::from_str(&input) {
