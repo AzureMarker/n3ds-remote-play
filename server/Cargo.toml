@@ -8,15 +8,19 @@ description = "Stream PC games to your 3DS. This is the server side which runs o
 [dependencies]
 anyhow = "1.0"
 async-trait = "0.1"
+env_logger = "0.11"
 futures = "0.3"
 fast_image_resize = "3.0"
 image = "0.24"
-scrap = "0.5"
+log = "0.4"
+rtp-types = "0.1"
 tokio = { version = "1.18", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }
 tokio-serde = { version = "0.9", features = ["bincode"] }
 tokio-util = { version = "0.7", features = ["codec"] }
+tracing = { version = "0.1", features = ["log-always"] }
 libc = "0.2"
+xcap = "0.7"
 
 n3ds-remote-play-common = { path = "../common" }
 

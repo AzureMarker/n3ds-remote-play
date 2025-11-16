@@ -1,3 +1,5 @@
+mod video_stream;
+
 use bincode::Options;
 use ctru::applets::swkbd;
 use ctru::applets::swkbd::SoftwareKeyboard;
@@ -9,9 +11,10 @@ use ctru::services::ir_user::{CirclePadProInputResponse, ConnectionStatus, IrDev
 use ctru::services::soc::Soc;
 use ctru::services::svc::HandleExt;
 use n3ds_remote_play_common::{CStick, CirclePad, InputState};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{Ipv4Addr, TcpStream, UdpSocket};
 use std::str::FromStr;
+use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 const PACKET_INFO_SIZE: usize = 8;
@@ -22,6 +25,12 @@ const CPP_CONNECTION_POLLING_PERIOD_MS: u8 = 0x08;
 const CPP_POLLING_PERIOD_MS: u8 = 0x32;
 
 fn main() {
+    ctru::set_panic_hook(true);
+    env_logger::builder()
+        .filter_level(log::LevelFilter::Info)
+        .format(|f, record| writeln!(f, "{}: {}", record.level(), record.args()))
+        .init();
+
     let gfx = Gfx::new().expect("Couldn't obtain GFX controller");
     let apt = Apt::new().expect("Couldn't obtain APT controller");
     let _soc = Soc::new().expect("Couldn't initialize networking");
@@ -40,11 +49,11 @@ fn main() {
     // on New 3DS causes ir:USER to not work.
     let hid = Hid::new().expect("Couldn't obtain HID controller");
 
-    println!("Enter the n3ds-remote-play server IP");
+    log::info!("Enter the n3ds-remote-play server IP");
     let server_ip = match get_server_ip(&apt, &gfx) {
         Some(server_ip) => server_ip,
         None => {
-            println!("Cancel was clicked, exiting in 5 seconds...");
+            log::info!("Cancel was clicked, exiting in 5 seconds...");
             std::thread::sleep(Duration::from_secs(5));
             return;
         }
@@ -53,9 +62,12 @@ fn main() {
 
     let mut remote_play_client = RemotePlayClient::new(apt, &gfx, ir_user, hid, server_ip)
         .expect("User has canceled client creation");
-    println!("Connected to remote play server at {server_ip}.");
+    log::info!("Connected to remote play server at {server_ip}.");
 
     remote_play_client.run();
+    drop(remote_play_client.connection);
+    log::info!("Exiting in 10 seconds...");
+    sleep(Duration::from_secs(10));
 }
 
 struct RemotePlayClient<'gfx> {
@@ -64,7 +76,10 @@ struct RemotePlayClient<'gfx> {
     ir_user: IrUser,
     hid: Hid,
     connection: TcpStream,
-    udp_connection: UdpSocket,
+    // udp_connection: UdpSocket,
+    // frame_reassembler: rtp_receiver::FrameReassembler,
+    frame_reassembler: Box<dyn video_stream::FrameReassembler>,
+    frame_recv_start: Option<Instant>,
     last_cpp_input: CirclePadProInputResponse,
 }
 
@@ -76,17 +91,19 @@ impl<'gfx> RemotePlayClient<'gfx> {
         hid: Hid,
         server_ip: Ipv4Addr,
     ) -> Option<Self> {
+        // Set up control connection
         let connection =
             TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
         connection.set_nonblocking(true).unwrap();
-        let local_address = connection.local_addr().unwrap();
+        // let local_address = connection.local_addr().unwrap();
 
-        let udp_connection =
-            UdpSocket::bind(local_address).expect("Failed to listen for UDP connections");
+        // Set up packet listener
+        // let udp_connection =
+        //     UdpSocket::bind(local_address).expect("Failed to listen for UDP connections");
         // udp_connection.set_nonblocking(true).unwrap();
-        udp_connection
-            .connect((server_ip, 3535))
-            .expect("Failed to set up UDP connection to server");
+        // udp_connection
+        //     .connect((server_ip, 3535))
+        //     .expect("Failed to set up UDP connection to server");
 
         Some(Self {
             apt,
@@ -94,13 +111,16 @@ impl<'gfx> RemotePlayClient<'gfx> {
             ir_user,
             hid,
             connection,
-            udp_connection,
+            // udp_connection,
+            // frame_reassembler: Box::new(video_stream::RtpFrameReassembler::new()),
+            frame_reassembler: Box::new(video_stream::TcpFrameReassembler::new()),
+            frame_recv_start: None,
             last_cpp_input: CirclePadProInputResponse::default(),
         })
     }
 
     fn send_input_state(&mut self, state: InputState) -> anyhow::Result<()> {
-        println!("Sending {state:?}");
+        log::trace!("Sending {state:?}");
 
         let bincode_options = bincode::DefaultOptions::new();
         let state_size: u32 = bincode_options.serialized_size(&state)?.try_into()?;
@@ -123,7 +143,6 @@ impl<'gfx> RemotePlayClient<'gfx> {
             .expect("Couldn't get ir:USER recv event");
 
         let mut udp_recv_buffer = vec![0u8; 70_000];
-        let mut frame_read_start;
 
         while self.apt.main_loop() {
             self.hid.scan_input();
@@ -165,55 +184,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
             self.send_input_state(input_state).unwrap();
 
             // Check if we've received a frame from the PC
-            frame_read_start = Instant::now();
-            let udp_result = self.udp_connection.recv(&mut udp_recv_buffer);
-            if let Ok(datagram_size) = udp_result {
-                let frame_decode_start = Instant::now();
-                // println!(
-                //     "Got datagram of size {datagram_size} bytes, duration: {:?}",
-                //     frame_decode_start.duration_since(frame_read_start)
-                // );
-                let jpeg_frame = &udp_recv_buffer[..datagram_size];
-                let frame = jpeg_decoder::Decoder::new(jpeg_frame).decode().unwrap();
-                // println!(
-                //     "Decoded frame with size: {}, duration: {:?}",
-                //     frame.len(),
-                //     frame_decode_start.elapsed()
-                // );
-
-                // Write the frame
-                let frame_write_start = Instant::now();
-                unsafe {
-                    self.gfx
-                        .top_screen
-                        .borrow_mut()
-                        .raw_framebuffer()
-                        .ptr
-                        .copy_from(frame.as_ptr(), frame.len());
-                }
-                let frame_flush_start = Instant::now();
-                let mut top_screen = self.gfx.top_screen.borrow_mut();
-                top_screen.flush_buffers();
-                // top_screen.swap_buffers();
-
-                let frame_flush_duration = frame_flush_start.elapsed();
-                let frame_write_duration = frame_flush_start.duration_since(frame_write_start);
-                // println!("Write: {frame_write_duration:?}, Flush: {frame_flush_duration:?}");
-                println!(
-                    "Datagram size: {datagram_size:5}, Recv: {:3?}ms, Proc: {:3?}ms",
-                    frame_decode_start
-                        .duration_since(frame_read_start)
-                        .as_millis(),
-                    frame_decode_start.elapsed().as_millis()
-                );
-            } else if let Err(e) = udp_result
-                && e.kind() != std::io::ErrorKind::WouldBlock
-            {
-                eprintln!(
-                    "Error while checking for UDP packet: {e}, kind = {}",
-                    e.kind()
-                );
-            }
+            self.process_video_stream(&mut udp_recv_buffer);
 
             self.gfx.wait_for_vblank();
         }
@@ -246,6 +217,91 @@ impl<'gfx> RemotePlayClient<'gfx> {
             .expect("Failed to request input polling from CPP");
     }
 
+    fn process_video_stream(&mut self, udp_recv_buffer: &mut [u8]) {
+        let frame_read_start = Instant::now();
+
+        // let udp_packet = match self.udp_connection.recv(udp_recv_buffer) {
+        let udp_packet = match self.connection.read(udp_recv_buffer) {
+            Ok(datagram_size) => &udp_recv_buffer[..datagram_size],
+            Err(e) => {
+                if e.kind() != std::io::ErrorKind::WouldBlock {
+                    log::error!(
+                        "Error while checking for UDP packet: {e}, kind = {}",
+                        e.kind()
+                    );
+                }
+                return;
+            }
+        };
+
+        let frame_decode_start = Instant::now();
+        if self.frame_recv_start.is_none() {
+            self.frame_recv_start = Some(frame_decode_start);
+        }
+        log::debug!(
+            "Got datagram of size {} bytes, duration: {:?}",
+            udp_packet.len(),
+            frame_decode_start.duration_since(frame_read_start)
+        );
+        let jpeg_frame = match self.frame_reassembler.process_packet(udp_packet) {
+            Ok(Some(jpeg_frame)) => {
+                log::debug!("Reassembled frame of size: {}", jpeg_frame.len());
+                jpeg_frame
+            }
+            Ok(None) => {
+                // Frame not complete yet
+                return;
+            }
+            Err(e) => {
+                log::error!("Error while processing RTP packet: {e}");
+                return;
+            }
+        };
+
+        let frame = match jpeg_decoder::Decoder::new(jpeg_frame.as_slice()).decode() {
+            Ok(frame) => frame,
+            Err(e) => {
+                log::error!("\x1b[31;1mError while decoding JPEG frame: {e}\x1b0m");
+                return;
+            }
+        };
+        log::debug!(
+            "Decoded frame with size: {}, duration: {:?}",
+            frame.len(),
+            frame_decode_start.elapsed()
+        );
+
+        // Write the frame
+        let frame_write_start = Instant::now();
+        unsafe {
+            self.gfx
+                .top_screen
+                .borrow_mut()
+                .raw_framebuffer()
+                .ptr
+                .copy_from(frame.as_ptr(), frame.len());
+        }
+        let frame_flush_start = Instant::now();
+        let mut top_screen = self.gfx.top_screen.borrow_mut();
+        top_screen.flush_buffers();
+        // top_screen.swap_buffers();
+
+        let frame_flush_duration = frame_flush_start.elapsed();
+        let frame_write_duration = frame_flush_start.duration_since(frame_write_start);
+        log::debug!("Write: {frame_write_duration:?}, Flush: {frame_flush_duration:?}");
+        log::info!(
+            "JPEG: {:5} Rx: {:3?}ms De: {:3?}ms",
+            jpeg_frame.len(),
+            frame_decode_start
+                .duration_since(self.frame_recv_start.unwrap())
+                .as_millis(),
+            frame_decode_start.elapsed().as_millis()
+        );
+        log::debug!("");
+
+        self.frame_recv_start = None;
+    }
+
     /// Detect and enable 3DS Circle Pad Pro (or continue without it if user skips)
     fn connect_circle_pad_pro(&mut self) {
         // Get event handles
@@ -258,7 +314,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
             .get_recv_event()
             .expect("Couldn't get ir:USER recv event");
 
-        println!(
+        log::info!(
             "If you have a New 3DS or Circle Pad Pro, press A to connect extra inputs. Otherwise press B."
         );
         'cpp_connect_loop: while self.apt.main_loop() {
@@ -266,12 +322,12 @@ impl<'gfx> RemotePlayClient<'gfx> {
             let keys_down_or_held = self.hid.keys_down().union(self.hid.keys_held());
 
             if keys_down_or_held.contains(KeyPad::B) {
-                println!("Canceling New 3DS / Circle Pad Pro detection");
+                log::info!("Canceling New 3DS / Circle Pad Pro detection");
                 break;
             }
 
             if keys_down_or_held.contains(KeyPad::A) {
-                println!("Trying to connect. Press Start to cancel.");
+                log::info!("Trying to connect. Press Start to cancel.");
 
                 // Connection loop
                 loop {
@@ -296,7 +352,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
                     if self.ir_user.get_status_info().connection_status
                         == ConnectionStatus::Connected
                     {
-                        println!("Connected!");
+                        log::info!("Connected!");
                         break;
                     }
 
@@ -326,7 +382,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
                         .ir_user
                         .request_input_polling(CPP_CONNECTION_POLLING_PERIOD_MS)
                     {
-                        println!("Error: {e:?}");
+                        log::error!("{e:?}");
                     }
 
                     // Wait for the response
@@ -334,7 +390,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
                         receive_packet_event.wait_for_event(Duration::from_millis(100));
 
                     if recv_event_result.is_ok() {
-                        println!("Got first packet from CPP");
+                        log::info!("Got first packet from CPP");
                         let packets = self.ir_user.get_packets().expect("Failed to get packets");
                         let packet_count = packets.len();
                         let Some(packet) = packets.last() else {
@@ -378,7 +434,7 @@ fn get_server_ip(apt: &Apt, gfx: &Gfx) -> Option<Ipv4Addr> {
                 let ip_addr = match Ipv4Addr::from_str(&input) {
                     Ok(ip_addr) => ip_addr,
                     Err(_) => {
-                        println!("Invalid IP address, try again");
+                        log::warn!("Invalid IP address, try again");
                         continue;
                     }
                 };
