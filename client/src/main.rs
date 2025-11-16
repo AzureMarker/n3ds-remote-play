@@ -16,6 +16,7 @@ use std::net::{Ipv4Addr, TcpStream, UdpSocket};
 use std::str::FromStr;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
+use zune_jpeg::zune_core::bytestream::ZCursor;
 
 const PACKET_INFO_SIZE: usize = 8;
 const MAX_PACKET_SIZE: usize = 32;
@@ -258,7 +259,8 @@ impl<'gfx> RemotePlayClient<'gfx> {
             }
         };
 
-        let frame = match jpeg_decoder::Decoder::new(jpeg_frame.as_slice()).decode() {
+        let cursor = ZCursor::new(jpeg_frame.as_slice());
+        let frame = match zune_jpeg::JpegDecoder::new(cursor).decode() {
             Ok(frame) => frame,
             Err(e) => {
                 log::error!("\x1b[31;1mError while decoding JPEG frame: {e}\x1b0m");
