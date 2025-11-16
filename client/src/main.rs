@@ -17,6 +17,7 @@ use std::str::FromStr;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use zune_jpeg::zune_core::bytestream::ZCursor;
+use zune_jpeg::zune_core::colorspace::ColorSpace;
 
 const PACKET_INFO_SIZE: usize = 8;
 const MAX_PACKET_SIZE: usize = 32;
@@ -260,7 +261,11 @@ impl<'gfx> RemotePlayClient<'gfx> {
         };
 
         let cursor = ZCursor::new(jpeg_frame.as_slice());
-        let frame = match zune_jpeg::JpegDecoder::new(cursor).decode() {
+        let jpeg_decoder_options = zune_jpeg::zune_core::options::DecoderOptions::new_fast()
+            .jpeg_set_out_colorspace(ColorSpace::BGR);
+        let mut jpeg_decoder =
+            zune_jpeg::JpegDecoder::new_with_options(cursor, jpeg_decoder_options);
+        let frame = match jpeg_decoder.decode() {
             Ok(frame) => frame,
             Err(e) => {
                 log::error!("\x1b[31;1mError while decoding JPEG frame: {e}\x1b0m");
