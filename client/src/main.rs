@@ -30,7 +30,7 @@ fn main() {
     ctru::set_panic_hook(true);
     env_logger::builder()
         .filter_level(log::LevelFilter::Info)
-        .format(|f, record| writeln!(f, "{}: {}", record.level(), record.args()))
+        .format(log_format)
         .init();
 
     let gfx = Gfx::new().expect("Couldn't obtain GFX controller");
@@ -70,6 +70,26 @@ fn main() {
     drop(remote_play_client.connection);
     log::info!("Exiting in 10 seconds...");
     sleep(Duration::from_secs(10));
+}
+
+fn log_format(f: &mut env_logger::fmt::Formatter, record: &log::Record<'_>) -> std::io::Result<()> {
+    let level = match record.level() {
+        log::Level::Error => "E",
+        log::Level::Warn => "W",
+        log::Level::Info => "I",
+        log::Level::Debug => "D",
+        log::Level::Trace => "T",
+    };
+    let color_start = match record.level() {
+        log::Level::Error => "\x1b[31;1m",
+        log::Level::Warn => "\x1b[33;1m",
+        log::Level::Info => "\x1b[0m",
+        log::Level::Debug => "\x1b[2m",
+        log::Level::Trace => "\x1b[2m",
+    };
+    let color_end = "\x1b[0m";
+
+    writeln!(f, "{color_start}{level}: {}{color_end}", record.args())
 }
 
 struct RemotePlayClient<'gfx> {
