@@ -23,14 +23,17 @@ use tokio_serde::SymmetricallyFramed;
 use tokio_serde::formats::SymmetricalBincode;
 use tokio_stream::wrappers::TcpListenerStream;
 use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
+use tracing::level_filters::LevelFilter;
+use tracing::{debug, error, info, warn};
+use tracing_subscriber::FmtSubscriber;
 
 const CLIENT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const N3DS_TOP_WIDTH: u32 = 400;
 const N3DS_TOP_HEIGHT: u32 = 240;
 
 fn main() {
-    env_logger::builder()
-        .filter_level(log::LevelFilter::Debug)
+    FmtSubscriber::builder()
+        .with_max_level(LevelFilter::DEBUG)
         .init();
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -43,7 +46,7 @@ fn main() {
 }
 
 async fn async_main() {
-    println!("Starting n3ds-remote-play server on 0.0.0.0:3535");
+    info!("Starting n3ds-remote-play server on 0.0.0.0:3535");
     let tcp_listener = TcpListener::bind(("0.0.0.0", 3535))
         .await
         .expect("Failed to bind address");
@@ -66,7 +69,7 @@ async fn async_main() {
                 ));
             }
             Err(e) => {
-                eprintln!("New connection error: {e}");
+                error!("New connection error: {e}");
                 continue;
             }
         }
@@ -81,27 +84,27 @@ async fn handle_connection(
     let peer_addr = match tcp_stream.peer_addr() {
         Ok(peer_addr) => peer_addr,
         Err(e) => {
-            eprintln!("Error while getting peer address: {e}");
+            error!("Error while getting peer address: {e}");
             return;
         }
     };
-    println!("New connection from {peer_addr}");
+    info!("New connection from {peer_addr}");
 
     let mut device = match device_factory.new_device().await {
         Ok(device) => device,
         Err(e) => {
-            eprintln!("Closing connection with [{peer_addr}] due to error:\n{e:?}");
+            error!("Closing connection with [{peer_addr}] due to error:\n{e:?}");
             return;
         }
     };
-    println!("Created uinput device");
+    debug!("Created uinput device");
 
     let (tcp_reader, mut tcp_writer) = tcp_stream.split();
     let mut input_stream = SymmetricallyFramed::new(
         FramedRead::new(tcp_reader, LengthDelimitedCodec::new()),
         SymmetricalBincode::<InputState>::default(),
     );
-    println!("Created input stream");
+    debug!("Created input stream");
 
     // Set up display capture
     let displays = xcap::Monitor::all().unwrap();
@@ -120,17 +123,17 @@ async fn handle_connection(
 
         // Wait for the 3DS to connect
         if let Err(e) = start_receiver.await {
-            eprintln!("Got an error in display task while waiting for 3DS to start: {e}");
+            error!("Got an error in display task while waiting for 3DS to start: {e}");
             return;
         }
-        println!("Starting to send frames");
+        info!("Starting to send frames");
 
         // Convert the video stream into a Tokio-compatible stream
         let (raw_video_sender, mut raw_video_receiver) = tokio::sync::mpsc::channel(1);
         let video_future = spawn_blocking(move || {
             for frame in video_stream {
                 if let Err(e) = raw_video_sender.blocking_send(frame) {
-                    eprintln!("Error while sending captured frame to Tokio task: {e}");
+                    error!("Error while sending captured frame to Tokio task: {e}");
                     break;
                 }
             }
@@ -138,6 +141,7 @@ async fn handle_connection(
 
         let mut next_frame_time = Instant::now();
         let mut sequence_number: u16 = 0;
+        let mut got_frame_last_time = false;
 
         'outer: loop {
             let mut last_frame = None;
@@ -156,10 +160,11 @@ async fn handle_connection(
                     frame = raw_video_receiver.recv() => {
                         // Drain the video stream to avoid buffering
                         if frame.is_none() {
-                            eprintln!("Video stream ended");
+                            warn!("Video stream ended");
                             break 'outer;
                         }
-                        last_frame = frame
+                        last_frame = frame;
+                        got_frame_last_time = true;
                     }
                 }
             }
@@ -200,8 +205,6 @@ async fn handle_connection(
                     .unwrap();
                     let resized_frame_bgr: image::RgbImage = resized_frame.convert();
                     let rotated_frame = image::imageops::rotate90(&resized_frame_bgr);
-                    // let mut tmp_file = BufWriter::new(File::create("test.jpeg").unwrap());
-                    // rotated_frame.write_to(&mut tmp_file, image::ImageOutputFormat::Jpeg).unwrap();
 
                     let mut jpeg_frame = Vec::new();
                     let mut jpeg_encoder =
@@ -210,17 +213,11 @@ async fn handle_connection(
 
                     let frame_processing_end = Instant::now();
                     let jpeg_frame_size = jpeg_frame.len();
-                    println!(
-                        "Encoded image with size {} to JPEG with size {}",
-                        rotated_frame.len(),
-                        jpeg_frame_size
-                    );
 
-                    let frame_processing_duration = frame_processing_end
-                        .duration_since(frame_processing_start)
-                        .as_millis();
-                    println!(
-                        "Processed frame with size {jpeg_frame_size:5}. Processing: {frame_processing_duration:3?}ms"
+                    let frame_processing_duration =
+                        frame_processing_end.duration_since(frame_processing_start);
+                    debug!(
+                        "Processed frame with size {jpeg_frame_size:5}. Processing: {frame_processing_duration:.1?}"
                     );
 
                     // Send frame to the 3DS
@@ -234,7 +231,7 @@ async fn handle_connection(
                     // .await
                     // if let Err(e) = tcp_writer.write_all(&jpeg_frame).await
                     // {
-                    //     eprintln!("Got error in display task while sending frame: {e}");
+                    //     error!("Got error in display task while sending frame: {e}");
                     //     // if let Some(e) = e.downcast_ref::<std::io::Error>()
                     //     //     && e.kind() == std::io::ErrorKind::ConnectionReset
                     //     if e.kind() == std::io::ErrorKind::ConnectionReset
@@ -243,7 +240,7 @@ async fn handle_connection(
                     //     }
                     // }
                     if let Err(e) = frame_sender.send(jpeg_frame).await {
-                        eprintln!("Error while sending frame to main task: {e}");
+                        error!("Error while sending frame to main task: {e}");
                         break;
                     }
                     // let frame_send_end = Instant::now();
@@ -251,7 +248,7 @@ async fn handle_connection(
                     //     .duration_since(frame_processing_start)
                     //     .as_millis();
                     // let frame_send_duration = frame_send_end.duration_since(frame_processing_end);
-                    // println!(
+                    // info!(
                     //     "Sent frame with size {:5}. Processing: {frame_processing_duration:3?}ms, Sending: {frame_send_duration:9?}",
                     //     jpeg_frame_size
                     // );
@@ -266,21 +263,24 @@ async fn handle_connection(
                     //     continue;
                     // }
                     //
-                    // eprintln!("Error while capturing frame: {e}");
-                    eprintln!("No frame received from video stream");
+                    // error!("Error while capturing frame: {e}");
+                    if got_frame_last_time {
+                        debug!("Stopped receiving frames from video stream");
+                    }
+                    got_frame_last_time = false;
                 }
             }
         }
 
-        println!("Display task exiting");
+        debug!("Display task exiting");
         display_video_recorder
             .stop()
             .inspect_err(|e| {
-                eprintln!("Error while stopping display video recorder: {e}");
+                error!("Error while stopping display video recorder: {e}");
             })
             .ok();
     });
-    println!("Spawned display capture task");
+    debug!("Spawned display capture task");
 
     loop {
         select! {
@@ -295,11 +295,11 @@ async fn handle_connection(
 
                 match input_result {
                     Ok(input_state) => {
-                        // println!("[{peer_addr}] {input_state:?}");
+                        // info!("[{peer_addr}] {input_state:?}");
                         device.emit_input(input_state).unwrap();
                     }
                     Err(e) => {
-                        eprintln!("Error while reading stream: {e}");
+                        error!("Error while reading stream: {e}");
                         if e.kind() == std::io::ErrorKind::ConnectionReset {
                             break;
                         }
@@ -319,7 +319,7 @@ async fn handle_connection(
 
                         // Send the frame over TCP
                         if let Err(e) = tcp_writer.write_all(&full_frame).await {
-                            eprintln!("Got error in display task while sending frame: {e}");
+                            error!("Got error in display task while sending frame: {e}");
                             if e.kind() == std::io::ErrorKind::ConnectionReset {
                                 break;
                             }
@@ -327,24 +327,25 @@ async fn handle_connection(
 
                         let frame_send_end = Instant::now();
                         let frame_send_duration = frame_send_end.duration_since(frame_send_start);
-                        println!("Sent frame with size {jpeg_frame_size:5}. Sending: {frame_send_duration:9?}");
+                        debug!("Sent frame with size {jpeg_frame_size:5}. Sending: {frame_send_duration:.1?}");
                     }
                     None => {
-                        eprintln!("Frame receiver channel closed");
+                        error!("Frame receiver channel closed");
                         break;
                     }
                 }
             }
             _ = tokio::time::sleep(CLIENT_CONNECTION_TIMEOUT) => {
-                eprintln!("Timed out while waiting for [{peer_addr}] to send an input packet ({CLIENT_CONNECTION_TIMEOUT:?})");
+                error!("Timed out while waiting for [{peer_addr}] to send an input packet ({CLIENT_CONNECTION_TIMEOUT:?})");
                 break;
             }
         }
     }
 
-    println!("Closing connection with [{peer_addr}]");
+    info!("Closing connection with [{peer_addr}]");
     let _ = exit_sender.send(());
     display_task_handle.await.unwrap();
+    info!("Closed connection with [{peer_addr}]");
 }
 
 const MTU: usize = 2500; // Maximum Transmission Unit size
@@ -383,7 +384,7 @@ async fn send_mjpeg_frame(
             .marker_bit(marker)
             .payload(jpeg_header.as_slice())
             .payload(payload);
-        println!(
+        debug!(
             "Sending RTP packet seq={}, marker={}",
             *sequence_number, marker
         );
