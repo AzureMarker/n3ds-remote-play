@@ -1,5 +1,6 @@
 mod video_stream;
 
+use crate::video_stream::FrameReassembler;
 use bincode::Options;
 use ctru::applets::swkbd;
 use ctru::applets::swkbd::SoftwareKeyboard;
@@ -16,6 +17,7 @@ use std::net::{Ipv4Addr, TcpStream, UdpSocket};
 use std::str::FromStr;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
+use std::{cmp, mem, panic};
 use zune_jpeg::zune_core::bytestream::ZCursor;
 use zune_jpeg::zune_core::colorspace::ColorSpace;
 
@@ -51,23 +53,20 @@ fn main() {
     // on New 3DS causes ir:USER to not work.
     let hid = Hid::new().expect("Couldn't obtain HID controller");
 
-    log::info!("Enter the n3ds-remote-play server IP");
-    let server_ip = match get_server_ip(&apt, &gfx) {
-        Some(server_ip) => server_ip,
-        None => {
-            log::info!("Cancel was clicked, exiting in 5 seconds...");
-            std::thread::sleep(Duration::from_secs(5));
-            return;
-        }
-    };
-    // let server_ip = Ipv4Addr::new(192, 168, 1, 141);
+    // log::info!("Enter the n3ds-remote-play server IP");
+    // let server_ip = match get_server_ip(&apt, &gfx) {
+    //     Some(server_ip) => server_ip,
+    //     None => {
+    //         log::info!("Cancel was clicked, exiting in 5 seconds...");
+    //         std::thread::sleep(Duration::from_secs(5));
+    //         return;
+    //     }
+    // };
+    let server_ip = Ipv4Addr::new(10, 0, 0, 132);
 
-    let mut remote_play_client = RemotePlayClient::new(apt, &gfx, ir_user, hid, server_ip)
-        .expect("User has canceled client creation");
-    log::info!("Connected to remote play server at {server_ip}.");
+    let mut remote_play_client = RemotePlayClient::new(apt, &gfx, ir_user, hid);
 
-    remote_play_client.run();
-    drop(remote_play_client.connection);
+    remote_play_client.run(server_ip);
     log::info!("Exiting in 10 seconds...");
     sleep(Duration::from_secs(10));
 }
@@ -97,7 +96,7 @@ struct RemotePlayClient<'gfx> {
     gfx: &'gfx Gfx,
     ir_user: IrUser,
     hid: Hid,
-    connection: TcpStream,
+    // connection: TcpStream,
     // udp_connection: UdpSocket,
     // frame_reassembler: rtp_receiver::FrameReassembler,
     frame_reassembler: Box<dyn video_stream::FrameReassembler>,
@@ -106,17 +105,11 @@ struct RemotePlayClient<'gfx> {
 }
 
 impl<'gfx> RemotePlayClient<'gfx> {
-    fn new(
-        apt: Apt,
-        gfx: &'gfx Gfx,
-        ir_user: IrUser,
-        hid: Hid,
-        server_ip: Ipv4Addr,
-    ) -> Option<Self> {
-        // Set up control connection
-        let connection =
-            TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
-        connection.set_nonblocking(true).unwrap();
+    fn new(apt: Apt, gfx: &'gfx Gfx, ir_user: IrUser, hid: Hid) -> Self {
+        // // Set up control connection
+        // let connection =
+        //     TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
+        // connection.set_nonblocking(true).unwrap();
         // let local_address = connection.local_addr().unwrap();
 
         // Set up packet listener
@@ -127,32 +120,38 @@ impl<'gfx> RemotePlayClient<'gfx> {
         //     .connect((server_ip, 3535))
         //     .expect("Failed to set up UDP connection to server");
 
-        Some(Self {
+        Self {
             apt,
             gfx,
             ir_user,
             hid,
-            connection,
+            // connection,
             // udp_connection,
             // frame_reassembler: Box::new(video_stream::RtpFrameReassembler::new()),
             frame_reassembler: Box::new(video_stream::TcpFrameReassembler::new()),
             frame_recv_start: None,
             last_cpp_input: CirclePadProInputResponse::default(),
-        })
+        }
     }
 
-    fn send_input_state(&mut self, state: InputState) -> anyhow::Result<()> {
+    fn send_input_state(connection: &mut TcpStream, state: InputState) -> anyhow::Result<()> {
         log::trace!("Sending {state:?}");
 
         let bincode_options = bincode::DefaultOptions::new();
         let state_size: u32 = bincode_options.serialized_size(&state)?.try_into()?;
 
-        self.connection.write_all(&state_size.to_be_bytes())?;
-        bincode_options.serialize_into(&mut self.connection, &state)?;
+        connection.write_all(&state_size.to_be_bytes())?;
+        bincode_options.serialize_into(connection, &state)?;
         Ok(())
     }
 
-    fn run(&mut self) {
+    fn run(&mut self, server_ip: Ipv4Addr) {
+        // Set up control connection
+        let connection =
+            TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
+        connection.set_nonblocking(true).unwrap();
+        log::info!("Connected to remote play server at {server_ip}.");
+
         self.gfx.top_screen.borrow_mut().set_double_buffering(false);
         self.gfx.top_screen.borrow_mut().swap_buffers();
         // gfx.top_screen.borrow_mut().set_wide_mode(true);
@@ -164,7 +163,23 @@ impl<'gfx> RemotePlayClient<'gfx> {
             .get_recv_event()
             .expect("Couldn't get ir:USER recv event");
 
-        let mut udp_recv_buffer = vec![0u8; 70_000];
+        // Set up system core thread to read frames over network in parallel
+        let (input_sender, input_receiver) = std::sync::mpsc::channel();
+        let (frame_sender, frame_receiver) = std::sync::mpsc::channel();
+        let result = unsafe {
+            self.spawn_system_core_thread(move || {
+                Self::run_system_thread(connection, input_receiver, frame_sender)
+            })
+        };
+        let Ok(system_thread) = result else {
+            log::error!(
+                "Failed to spawn system core thread: {:?}",
+                result.unwrap_err()
+            );
+            return;
+        };
+
+        // let mut udp_recv_buffer = vec![0u8; 70_000];
 
         while self.apt.main_loop() {
             self.hid.scan_input();
@@ -203,12 +218,182 @@ impl<'gfx> RemotePlayClient<'gfx> {
                     y: self.last_cpp_input.c_stick_y,
                 },
             };
-            self.send_input_state(input_state).unwrap();
+
+            // Send input state to system thread
+            if let Err(e) = input_sender.send(input_state) {
+                log::error!("Input sender channel closed: {e}");
+                break;
+            }
 
             // Check if we've received a frame from the PC
-            self.process_video_stream(&mut udp_recv_buffer);
+            if let Ok((frame, recv_duration)) = frame_receiver.try_recv() {
+                self.process_video_stream(frame, recv_duration);
+            }
 
             self.gfx.wait_for_vblank();
+        }
+
+        unsafe { libc::pthread_detach(system_thread) };
+    }
+
+    fn run_system_thread(
+        mut connection: TcpStream,
+        input_reader: std::sync::mpsc::Receiver<InputState>,
+        frame_writer: std::sync::mpsc::Sender<(Vec<u8>, Duration)>,
+    ) {
+        let mut frame_reassembler = video_stream::TcpFrameReassembler::new();
+        let mut tcp_recv_buffer = vec![0u8; 70_000];
+        let mut frame_recv_start: Option<Instant> = None;
+        loop {
+            // Sleep briefly to avoid busy-looping
+            sleep(Duration::from_millis(1));
+
+            // Read input state from channel
+            match input_reader.try_recv() {
+                Ok(state) => {
+                    // Send input state to server
+                    if let Err(e) = Self::send_input_state(&mut connection, state) {
+                        log::error!("Failed to send input state: {e}");
+                        break;
+                    }
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // No new input state, continue
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    log::info!("Input reader channel disconnected");
+                    break;
+                }
+            };
+
+            // Read frame data from TCP connection
+            let bytes_read = match connection.read(&mut tcp_recv_buffer) {
+                Ok(size) => {
+                    if frame_recv_start.is_none() {
+                        frame_recv_start = Some(Instant::now());
+                    }
+                    size
+                }
+                Err(e) => {
+                    if e.kind() != std::io::ErrorKind::WouldBlock {
+                        log::error!(
+                            "Error while checking for UDP packet: {e}, kind = {}",
+                            e.kind()
+                        );
+                    }
+                    continue;
+                }
+            };
+
+            if bytes_read == 0 {
+                log::info!("Server closed the connection");
+                break;
+            }
+
+            let packet_data = &tcp_recv_buffer[..bytes_read];
+            match frame_reassembler.process_packet(packet_data) {
+                Ok(Some(frame)) => {
+                    // Send complete frame to main thread
+                    let frame_recv_duration = frame_recv_start.unwrap().elapsed();
+                    frame_recv_start = None;
+
+                    if let Err(e) = frame_writer.send((frame, frame_recv_duration)) {
+                        log::error!("Frame writer channel closed: {e}");
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    // Frame not complete yet
+                }
+                Err(e) => {
+                    log::error!("Error while processing TCP packet: {e}");
+                    break;
+                }
+            }
+        }
+    }
+
+    unsafe fn spawn_system_core_thread(
+        &mut self,
+        f: impl FnOnce() + Send + 'static,
+    ) -> std::io::Result<libc::pthread_t> {
+        self.apt
+            .set_app_cpu_time_limit(30)
+            .expect("Failed to enable system core");
+
+        // Most of this implementation has been copied and modified from std.
+
+        let stack = 2 * 1024 * 1024; // DEFAULT_MIN_STACK_SIZE
+        let main = Box::new(move || {
+            let try_result = panic::catch_unwind(panic::AssertUnwindSafe(f));
+
+            if let Err(err) = try_result {
+                log::error!("thread panicked: {err:?}");
+            }
+        });
+
+        // SAFETY: dynamic size and alignment of the Box remain the same. See below for why the
+        // lifetime change is justified.
+        let main =
+            unsafe { Box::from_raw(Box::into_raw(main) as *mut (dyn FnOnce() + Send + 'static)) };
+        let p = Box::into_raw(Box::new(main));
+        let mut native: libc::pthread_t = unsafe { mem::zeroed() };
+        let mut attr: mem::MaybeUninit<libc::pthread_attr_t> = mem::MaybeUninit::uninit();
+        assert_eq!(unsafe { libc::pthread_attr_init(attr.as_mut_ptr()) }, 0);
+
+        let stack_size = cmp::max(stack, libc::PTHREAD_STACK_MIN);
+
+        match unsafe { libc::pthread_attr_setstacksize(attr.as_mut_ptr(), stack_size) } {
+            0 => {}
+            n => {
+                assert_eq!(n, libc::EINVAL);
+                // EINVAL means |stack_size| is either too small or not a
+                // multiple of the system page size. Because it's definitely
+                // >= PTHREAD_STACK_MIN, it must be an alignment issue.
+                // Round up to the nearest page and try again.
+                let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
+                let stack_size =
+                    (stack_size + page_size - 1) & (-(page_size as isize - 1) as usize - 1);
+                assert_eq!(
+                    unsafe { libc::pthread_attr_setstacksize(attr.as_mut_ptr(), stack_size) },
+                    0
+                );
+            }
+        };
+
+        // This is the 3DS specific part
+        assert_eq!(
+            unsafe { libc::pthread_attr_setprocessorid_np(attr.as_mut_ptr(), 1) },
+            0
+        );
+
+        let ret =
+            unsafe { libc::pthread_create(&mut native, attr.as_ptr(), thread_start, p as *mut _) };
+        // Note: if the thread creation fails and this assert fails, then p will
+        // be leaked. However, an alternative design could cause double-free
+        // which is clearly worse.
+        assert_eq!(unsafe { libc::pthread_attr_destroy(attr.as_mut_ptr()) }, 0);
+
+        return if ret != 0 {
+            // The thread failed to start and as a result p was not consumed. Therefore, it is
+            // safe to reconstruct the box so that it gets deallocated.
+            unsafe {
+                drop(Box::from_raw(p));
+            }
+            Err(std::io::Error::from_raw_os_error(ret))
+        } else {
+            Ok(native)
+        };
+
+        extern "C" fn thread_start(main: *mut libc::c_void) -> *mut libc::c_void {
+            unsafe {
+                // Next, set up our stack overflow handler which may get triggered if we run
+                // out of stack.
+                // let _handler = stack_overflow::Handler::new();
+                // Finally, let's run some code.
+                Box::from_raw(main as *mut Box<dyn FnOnce()>)();
+            }
+            std::ptr::null_mut()
         }
     }
 
@@ -239,46 +424,47 @@ impl<'gfx> RemotePlayClient<'gfx> {
             .expect("Failed to request input polling from CPP");
     }
 
-    fn process_video_stream(&mut self, udp_recv_buffer: &mut [u8]) {
-        let frame_read_start = Instant::now();
-
-        // let udp_packet = match self.udp_connection.recv(udp_recv_buffer) {
-        let udp_packet = match self.connection.read(udp_recv_buffer) {
-            Ok(datagram_size) => &udp_recv_buffer[..datagram_size],
-            Err(e) => {
-                if e.kind() != std::io::ErrorKind::WouldBlock {
-                    log::error!(
-                        "Error while checking for UDP packet: {e}, kind = {}",
-                        e.kind()
-                    );
-                }
-                return;
-            }
-        };
-
+    fn process_video_stream(&mut self, jpeg_frame: Vec<u8>, frame_recv_duration: Duration) {
+        // fn process_video_stream(&mut self, udp_recv_buffer: &mut [u8]) {
+        // let frame_read_start = Instant::now();
+        //
+        // // let udp_packet = match self.udp_connection.recv(udp_recv_buffer) {
+        // let udp_packet = match self.connection.read(udp_recv_buffer) {
+        //     Ok(datagram_size) => &udp_recv_buffer[..datagram_size],
+        //     Err(e) => {
+        //         if e.kind() != std::io::ErrorKind::WouldBlock {
+        //             log::error!(
+        //                 "Error while checking for UDP packet: {e}, kind = {}",
+        //                 e.kind()
+        //             );
+        //         }
+        //         return;
+        //     }
+        // };
+        //
         let frame_decode_start = Instant::now();
-        if self.frame_recv_start.is_none() {
-            self.frame_recv_start = Some(frame_decode_start);
-        }
-        log::debug!(
-            "Got datagram of size {} bytes, duration: {:?}",
-            udp_packet.len(),
-            frame_decode_start.duration_since(frame_read_start)
-        );
-        let jpeg_frame = match self.frame_reassembler.process_packet(udp_packet) {
-            Ok(Some(jpeg_frame)) => {
-                log::debug!("Reassembled frame of size: {}", jpeg_frame.len());
-                jpeg_frame
-            }
-            Ok(None) => {
-                // Frame not complete yet
-                return;
-            }
-            Err(e) => {
-                log::error!("Error while processing RTP packet: {e}");
-                return;
-            }
-        };
+        // if self.frame_recv_start.is_none() {
+        //     self.frame_recv_start = Some(frame_decode_start);
+        // }
+        // log::debug!(
+        //     "Got datagram of size {} bytes, duration: {:?}",
+        //     udp_packet.len(),
+        //     frame_decode_start.duration_since(frame_read_start)
+        // );
+        // let jpeg_frame = match self.frame_reassembler.process_packet(udp_packet) {
+        //     Ok(Some(jpeg_frame)) => {
+        //         log::debug!("Reassembled frame of size: {}", jpeg_frame.len());
+        //         jpeg_frame
+        //     }
+        //     Ok(None) => {
+        //         // Frame not complete yet
+        //         return;
+        //     }
+        //     Err(e) => {
+        //         log::error!("Error while processing RTP packet: {e}");
+        //         return;
+        //     }
+        // };
 
         let cursor = ZCursor::new(jpeg_frame.as_slice());
         let jpeg_decoder_options = zune_jpeg::zune_core::options::DecoderOptions::new_fast()
@@ -319,9 +505,10 @@ impl<'gfx> RemotePlayClient<'gfx> {
         log::info!(
             "JPEG: {:5} Rx: {:3?}ms De: {:3?}ms",
             jpeg_frame.len(),
-            frame_decode_start
-                .duration_since(self.frame_recv_start.unwrap())
-                .as_millis(),
+            // frame_decode_start
+            //     .duration_since(self.frame_recv_start.unwrap())
+            //     .as_millis(),
+            frame_recv_duration.as_millis(),
             frame_decode_start.elapsed().as_millis()
         );
         log::debug!("");
