@@ -351,7 +351,8 @@ impl<'gfx> RemotePlayClient<'gfx> {
                 // multiple of the system page size. Because it's definitely
                 // >= PTHREAD_STACK_MIN, it must be an alignment issue.
                 // Round up to the nearest page and try again.
-                let page_size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) as usize };
+                // FIXME: Replaced libc::_SC_PAGESIZE with value 8 to avoid error fixed in https://github.com/rust-lang/libc/pull/4875
+                let page_size = unsafe { libc::sysconf(8) as usize };
                 let stack_size =
                     (stack_size + page_size - 1) & (-(page_size as isize - 1) as usize - 1);
                 assert_eq!(

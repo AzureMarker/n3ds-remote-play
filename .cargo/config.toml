@@ -1,0 +1,6 @@
+[unstable]
+# Only needed for the client binary, but Cargo only looks at the workspace config and does not support per-package or
+# per-target unstable flags yet: https://github.com/rust-lang/cargo/issues/8733
+# Also, we cannot use build-std with the per-package-target feature due to a bug:
+# https://github.com/rust-lang/cargo/issues/11898
+build-std = ["std", "test"]

@@ -1,6 +1,0 @@
-[build]
-target = "armv6k-nintendo-3ds"
-rustflags = ["-L/opt/devkitpro/libctru/lib", "-lctrud"]
-
-[unstable]
-build-std = ["std", "test"]
