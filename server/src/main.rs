@@ -6,25 +6,25 @@ extern crate tracing;
 mod virtual_device;
 
 use crate::virtual_device::{VirtualDevice, VirtualDeviceFactory};
+use bincode::Options;
 use futures::StreamExt;
 use image::buffer::ConvertBuffer;
 use n3ds_remote_play_common::InputState;
 use rtp_types::RtpPacketBuilder;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpListener, TcpStream, UdpSocket};
-use tokio::select;
+use tokio::sync::RwLock;
 use tokio::task::{LocalSet, spawn_blocking, spawn_local};
 use tokio::time::sleep;
-use tokio_serde::SymmetricallyFramed;
-use tokio_serde::formats::SymmetricalBincode;
+use tokio::{select, spawn};
 use tokio_stream::wrappers::TcpListenerStream;
-use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
 use tracing::level_filters::LevelFilter;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber::FmtSubscriber;
 
 const CLIENT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
@@ -54,17 +54,25 @@ async fn async_main() {
     let udp_socket = UdpSocket::bind(("0.0.0.0", 3535))
         .await
         .expect("Failed to bind UDP socket");
-    let udp_socket = Arc::new(udp_socket);
     let device_factory = Arc::new(
         virtual_device::new_device_factory().expect("Failed to create virtual device factory"),
     );
 
+    let input_map = Arc::new(RwLock::new(HashMap::new()));
+    let (exit_sender, exit_receiver) = tokio::sync::oneshot::channel::<()>();
+    let udp_input_mapper = spawn(input_mapper(
+        udp_socket,
+        Arc::clone(&input_map),
+        exit_receiver,
+    ));
+
+    info!("Server started, waiting for connections");
     while let Some(connection) = tcp_stream.next().await {
         match connection {
             Ok(connection) => {
                 spawn_local(handle_connection(
                     connection,
-                    Arc::clone(&udp_socket),
+                    Arc::clone(&input_map),
                     Arc::clone(&device_factory),
                 ));
             }
@@ -74,11 +82,63 @@ async fn async_main() {
             }
         }
     }
+
+    info!("Server shutting down");
+    exit_sender.send(()).ok();
+    udp_input_mapper.await.ok();
+    info!("Server shut down");
+}
+
+async fn input_mapper(
+    udp_socket: UdpSocket,
+    input_map: Arc<RwLock<HashMap<SocketAddr, tokio::sync::mpsc::UnboundedSender<InputState>>>>,
+    mut exit_receiver: tokio::sync::oneshot::Receiver<()>,
+) {
+    let mut buffer = vec![0; 1024];
+    loop {
+        let packet = select! {
+            _ = &mut exit_receiver => {
+                debug!("UDP input mapper exiting");
+                break;
+            }
+            packet = udp_socket.recv_from(&mut buffer) => packet
+        };
+
+        let Ok((size, src_addr)) = packet.inspect_err(|e| {
+            error!("Error while receiving UDP packet: {e}");
+        }) else {
+            continue;
+        };
+        trace!("Received UDP input packet of size {size} from [{src_addr}]");
+
+        // Look up the input channel for this client
+        let input_map = input_map.read().await;
+        let Some(sender) = input_map.get(&src_addr) else {
+            warn!("Received UDP input packet from unknown address [{src_addr}]");
+            continue;
+        };
+
+        // Deserialize the input state
+        let bincode_options = bincode::DefaultOptions::new();
+        let Ok(input_state) = bincode_options
+            .deserialize::<InputState>(&buffer[..size])
+            .inspect_err(|e| {
+                error!("Error while deserializing input state from [{src_addr}]: {e}");
+            })
+        else {
+            continue;
+        };
+
+        // Send the input state to the corresponding client handler
+        if let Err(e) = sender.send(input_state) {
+            error!("Error while sending input state to TCP handler for [{src_addr}]: {e}");
+        }
+    }
 }
 
 async fn handle_connection(
     mut tcp_stream: TcpStream,
-    udp_socket: Arc<UdpSocket>,
+    input_map: Arc<RwLock<HashMap<SocketAddr, tokio::sync::mpsc::UnboundedSender<InputState>>>>,
     device_factory: Arc<impl VirtualDeviceFactory>,
 ) {
     let peer_addr = match tcp_stream.peer_addr() {
@@ -99,12 +159,13 @@ async fn handle_connection(
     };
     debug!("Created uinput device");
 
-    let (tcp_reader, mut tcp_writer) = tcp_stream.split();
-    let mut input_stream = SymmetricallyFramed::new(
-        FramedRead::new(tcp_reader, LengthDelimitedCodec::new()),
-        SymmetricalBincode::<InputState>::default(),
-    );
+    let (input_sender, mut input_receiver) = tokio::sync::mpsc::unbounded_channel::<InputState>();
+    let mut input_map_guard = input_map.write().await;
+    input_map_guard.insert(peer_addr, input_sender);
+    drop(input_map_guard);
     debug!("Created input stream");
+
+    let (_tcp_reader, mut tcp_writer) = tcp_stream.split();
 
     // Set up display capture
     let displays = xcap::Monitor::all().unwrap();
@@ -279,13 +340,16 @@ async fn handle_connection(
                 error!("Error while stopping display video recorder: {e}");
             })
             .ok();
+        let mut input_map_guard = input_map.write().await;
+        input_map_guard.remove(&peer_addr);
     });
     debug!("Spawned display capture task");
 
     loop {
         select! {
-            stream_item = input_stream.next() => {
-                let Some(input_result) = stream_item else {
+            stream_item = input_receiver.recv() => {
+                let Some(input_state) = stream_item else {
+                    info!("Input receiver channel closed for [{peer_addr}]");
                     break;
                 };
 
@@ -293,18 +357,8 @@ async fn handle_connection(
                     let _ = sender.send(());
                 }
 
-                match input_result {
-                    Ok(input_state) => {
-                        // info!("[{peer_addr}] {input_state:?}");
-                        device.emit_input(input_state).unwrap();
-                    }
-                    Err(e) => {
-                        error!("Error while reading stream: {e}");
-                        if e.kind() == std::io::ErrorKind::ConnectionReset {
-                            break;
-                        }
-                    }
-                }
+                // info!("[{peer_addr}] {input_state:?}");
+                device.emit_input(input_state).unwrap();
             }
             frame = frame_receiver.recv() => {
                 match frame {
@@ -344,6 +398,7 @@ async fn handle_connection(
 
     info!("Closing connection with [{peer_addr}]");
     let _ = exit_sender.send(());
+    frame_receiver.close();
     display_task_handle.await.unwrap();
     info!("Closed connection with [{peer_addr}]");
 }

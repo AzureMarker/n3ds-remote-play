@@ -62,7 +62,7 @@ fn main() {
     //         return;
     //     }
     // };
-    let server_ip = Ipv4Addr::new(10, 0, 0, 132);
+    let server_ip = Ipv4Addr::new(192, 168, 1, 160);
 
     let mut remote_play_client = RemotePlayClient::new(apt, &gfx, ir_user, hid);
 
@@ -134,22 +134,26 @@ impl<'gfx> RemotePlayClient<'gfx> {
         }
     }
 
-    fn send_input_state(connection: &mut TcpStream, state: InputState) -> anyhow::Result<()> {
+    fn send_input_state(connection: &mut UdpSocket, state: InputState) -> anyhow::Result<()> {
         log::trace!("Sending {state:?}");
 
         let bincode_options = bincode::DefaultOptions::new();
-        let state_size: u32 = bincode_options.serialized_size(&state)?.try_into()?;
-
-        connection.write_all(&state_size.to_be_bytes())?;
-        bincode_options.serialize_into(connection, &state)?;
+        let data = bincode_options.serialize(&state)?;
+        connection.send(&data)?;
         Ok(())
     }
 
     fn run(&mut self, server_ip: Ipv4Addr) {
-        // Set up control connection
+        // Set up connections
         let connection =
             TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
         connection.set_nonblocking(true).unwrap();
+        let udp_connection = UdpSocket::bind(connection.local_addr().unwrap())
+            .expect("Failed to listen for UDP connections");
+        udp_connection
+            .connect((server_ip, 3535))
+            .expect("Failed to set up UDP connection to server");
+        udp_connection.set_nonblocking(true).unwrap();
         log::info!("Connected to remote play server at {server_ip}.");
 
         self.gfx.top_screen.borrow_mut().set_double_buffering(false);
@@ -168,7 +172,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
         let (frame_sender, frame_receiver) = std::sync::mpsc::channel();
         let result = unsafe {
             self.spawn_system_core_thread(move || {
-                Self::run_system_thread(connection, input_receiver, frame_sender)
+                Self::run_system_thread(connection, udp_connection, input_receiver, frame_sender)
             })
         };
         let Ok(system_thread) = result else {
@@ -238,6 +242,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
 
     fn run_system_thread(
         mut connection: TcpStream,
+        mut udp_connection: UdpSocket,
         input_reader: std::sync::mpsc::Receiver<InputState>,
         frame_writer: std::sync::mpsc::Sender<(Vec<u8>, Duration)>,
     ) {
@@ -252,7 +257,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
             match input_reader.try_recv() {
                 Ok(state) => {
                     // Send input state to server
-                    if let Err(e) = Self::send_input_state(&mut connection, state) {
+                    if let Err(e) = Self::send_input_state(&mut udp_connection, state) {
                         log::error!("Failed to send input state: {e}");
                         break;
                     }
