@@ -1,5 +1,7 @@
+use ffmpeg_next as ffmpeg;
 use rtp_types::RtpPacket;
 use std::cmp::min;
+use anyhow::anyhow;
 
 pub trait FrameReassembler {
     fn process_packet(&mut self, packet_buf: &[u8]) -> anyhow::Result<Option<Vec<u8>>>;
@@ -179,5 +181,73 @@ impl FrameReassembler for TcpFrameReassembler {
                 unreachable!();
             }
         }
+    }
+}
+
+pub struct Mpeg1FrameReassembler {
+    decoder: ffmpeg::codec::decoder::Video,
+    video_frame: ffmpeg::util::frame::Video,
+}
+
+impl Mpeg1FrameReassembler {
+    pub fn new() -> anyhow::Result<Self> {
+        // Initialize FFmpeg libraries
+        ffmpeg::init()?;
+
+        // Find the MPEG1 decoder
+        let codec = ffmpeg::decoder::find(ffmpeg::codec::Id::MPEG1VIDEO)
+            .ok_or_else(|| anyhow!("MPEG1 decoder not found"))?;
+
+        let context = ffmpeg::codec::context::Context::new_with_codec(codec);
+        let decoder = context.decoder().video()?;
+        let video_frame = ffmpeg::util::frame::Video::empty();
+
+        Ok(Self { decoder, video_frame })
+    }
+}
+
+impl FrameReassembler for Mpeg1FrameReassembler {
+    fn process_packet(&mut self, packet_buf: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+        let packet = ffmpeg::codec::packet::Packet::borrow(packet_buf);
+
+        // Send the packet to the decoder
+        self.decoder.send_packet(&packet)?;
+
+        // Try to receive a decoded frame
+        // Note: Decoders may require multiple packets before returning a frame (B-frames)
+        // or one packet might contain multiple frames.
+        match self.decoder.receive_frame(&mut self.video_frame) {
+            Ok(()) => {
+                // For demonstration, we convert the YUV data to a simple Vec<u8>.
+                // In a real app, you might want to convert to RGB or use the planes directly.
+                let data = self.extract_raw_frame_data();
+                Ok(Some(data))
+            }
+            Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::sys::EAGAIN => {
+                // Decoder needs more data to produce a frame
+                Ok(None)
+            }
+            Err(e) => Err(anyhow!("Decoding error: {}", e)),
+        }
+    }
+}
+
+impl Mpeg1FrameReassembler {
+    fn extract_raw_frame_data(&self) -> Vec<u8> {
+        // Simple extraction of YUV420P data (most common for MPEG-1)
+        let mut buffer = Vec::new();
+        for i in 0..3 {
+            let data = self.video_frame.data(i);
+            let stride = self.video_frame.stride(i);
+            let width = if i == 0 { self.video_frame.width() } else { self.video_frame.width() / 2 };
+            let height = if i == 0 { self.video_frame.height() } else { self.video_frame.height() / 2 };
+
+            for y in 0..height as usize {
+                let start = y * stride;
+                let end = start + width as usize;
+                buffer.extend_from_slice(&data[start..end]);
+            }
+        }
+        buffer
     }
 }

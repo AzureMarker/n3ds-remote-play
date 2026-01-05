@@ -245,7 +245,8 @@ impl<'gfx> RemotePlayClient<'gfx> {
         input_reader: std::sync::mpsc::Receiver<InputState>,
         frame_writer: std::sync::mpsc::Sender<(Vec<u8>, Duration)>,
     ) {
-        let mut frame_reassembler = video_stream::TcpFrameReassembler::new();
+        let mut frame_reassembler = video_stream::Mpeg1FrameReassembler::new()
+            .expect("Failed to create MPEG1 frame reassembler");
         let mut tcp_recv_buffer = vec![0u8; 70_000];
         let mut frame_recv_start: Option<Instant> = None;
         loop {

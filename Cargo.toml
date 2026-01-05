@@ -4,3 +4,7 @@ resolver = "2"
 
 [profile.release]
 debug = 1
+
+[patch.crates-io]
+ffmpeg-sys-next = { git = "https://github.com/AzureMarker/rust-ffmpeg-sys.git" }
+#ffmpeg-sys-next = { path = "../rust-ffmpeg-sys" }

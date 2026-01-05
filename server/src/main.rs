@@ -26,6 +26,7 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tracing::level_filters::LevelFilter;
 use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber::FmtSubscriber;
+use ffmpeg_next as ffmpeg;
 
 const CLIENT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const N3DS_TOP_WIDTH: u32 = 400;
@@ -35,6 +36,9 @@ fn main() {
     FmtSubscriber::builder()
         .with_max_level(LevelFilter::DEBUG)
         .init();
+
+    // Initialize ffmpeg
+    ffmpeg::init().expect("Failed to initialize ffmpeg");
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -200,6 +204,27 @@ async fn handle_connection(
             }
         });
 
+        // Create MPEG-1 encoder using ffmpeg (rotated dimensions since 3DS top screen is portrait)
+        let codec = ffmpeg::encoder::find(ffmpeg::codec::Id::MPEG1VIDEO)
+            .expect("Failed to find MPEG1 codec");
+
+        let mut encoder = ffmpeg::codec::context::Context::new_with_codec(codec)
+            .encoder()
+            .video()
+            .expect("Failed to create video encoder");
+
+        encoder.set_width(N3DS_TOP_HEIGHT);
+        encoder.set_height(N3DS_TOP_WIDTH);
+        encoder.set_format(ffmpeg::format::Pixel::RGB24);
+        encoder.set_frame_rate(Some((5, 1)));
+        encoder.set_time_base((1, 5));
+        encoder.set_bit_rate(500000); // 500 kbps
+        encoder.set_gop(12); // Group of pictures size
+
+        let mut encoder = encoder.open_as(codec).expect("Failed to open encoder");
+
+        let mut frame_index: i64 = 0;
+
         let mut next_frame_time = Instant::now();
         let mut sequence_number: u16 = 0;
         let mut got_frame_last_time = false;
@@ -267,18 +292,46 @@ async fn handle_connection(
                     let resized_frame_bgr: image::RgbImage = resized_frame.convert();
                     let rotated_frame = image::imageops::rotate90(&resized_frame_bgr);
 
-                    let mut jpeg_frame = Vec::new();
-                    let mut jpeg_encoder =
-                        image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_frame, 80);
-                    jpeg_encoder.encode_image(&rotated_frame).unwrap();
+                    // let mut jpeg_frame = Vec::new();
+                    // let mut jpeg_encoder =
+                    //     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_frame, 80);
+                    // jpeg_encoder.encode_image(&rotated_frame).unwrap();
+
+                    // Encode frame to MPEG-1 using ffmpeg
+                    let mut video_frame = ffmpeg::util::frame::Video::new(
+                        ffmpeg::format::Pixel::BGR24,
+                        N3DS_TOP_HEIGHT,
+                        N3DS_TOP_WIDTH,
+                    );
+
+                    // Copy RGB data to ffmpeg frame
+                    let frame_data = rotated_frame.as_raw();
+                    video_frame.data_mut(0)[..frame_data.len()].copy_from_slice(frame_data);
+                    video_frame.set_pts(Some(frame_index));
+                    frame_index += 1;
+
+                    // Encode the frame
+                    let mut mpeg_packets = Vec::new();
+
+                    if encoder.send_frame(&video_frame).is_ok() {
+                        loop  {
+                            let mut encoded_packet = ffmpeg::Packet::empty();
+                            if encoder.receive_packet(&mut encoded_packet).is_ok() {
+                                mpeg_packets.push(encoded_packet);
+                            } else {
+                                break;
+                            }
+                        }
+                    }
 
                     let frame_processing_end = Instant::now();
-                    let jpeg_frame_size = jpeg_frame.len();
+                    let mpeg_packet_count = mpeg_packets.len();
+                    let mpeg_data_size: usize = mpeg_packets.iter().map(ffmpeg::Packet::size).sum();
 
                     let frame_processing_duration =
                         frame_processing_end.duration_since(frame_processing_start);
                     debug!(
-                        "Processed frame with size {jpeg_frame_size:5}. Processing: {frame_processing_duration:.1?}"
+                        "Processed frame with packet count {mpeg_packet_count} and total size {mpeg_data_size:5}. Processing: {frame_processing_duration:.1?}"
                     );
 
                     // Send frame to the 3DS
@@ -300,9 +353,11 @@ async fn handle_connection(
                     //         break;
                     //     }
                     // }
-                    if let Err(e) = frame_sender.send(jpeg_frame).await {
-                        error!("Error while sending frame to main task: {e}");
-                        break;
+                    for packet in mpeg_packets {
+                        if let Err(e) = frame_sender.send(packet.data().unwrap().to_vec()).await {
+                            error!("Error while sending frame to main task: {e}");
+                            break;
+                        }
                     }
                     // let frame_send_end = Instant::now();
                     // let frame_processing_duration = frame_processing_end
@@ -366,9 +421,9 @@ async fn handle_connection(
                         let frame_send_start = Instant::now();
 
                         // Prepend the frame size as a big-endian u32
-                        let jpeg_frame_size = frame.len() as u32;
+                        let mpeg_frame_size = frame.len() as u32;
                         let mut full_frame = Vec::new();
-                        full_frame.extend_from_slice(&jpeg_frame_size.to_be_bytes());
+                        full_frame.extend_from_slice(&mpeg_frame_size.to_be_bytes());
                         full_frame.extend_from_slice(&frame);
 
                         // Send the frame over TCP
@@ -381,7 +436,7 @@ async fn handle_connection(
 
                         let frame_send_end = Instant::now();
                         let frame_send_duration = frame_send_end.duration_since(frame_send_start);
-                        debug!("Sent frame with size {jpeg_frame_size:5}. Sending: {frame_send_duration:.1?}");
+                        debug!("Sent frame with size {mpeg_frame_size:5}. Sending: {frame_send_duration:.1?}");
                     }
                     None => {
                         error!("Frame receiver channel closed");

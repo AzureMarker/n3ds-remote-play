@@ -21,6 +21,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["tracing-log"] }
 libc = "0.2"
 xcap = "0.8.1"
+ffmpeg-next = "8.0.0"
 
 n3ds-remote-play-common = { path = "../common" }
 

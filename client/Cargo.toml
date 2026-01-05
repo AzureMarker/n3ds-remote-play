@@ -11,6 +11,7 @@ bincode = "1.3"
 ctru-rs = { git = "https://github.com/rust3ds/ctru-rs.git" }
 ctru-sys = { git = "https://github.com/rust3ds/ctru-rs.git" }
 env_logger = { version = "0.11", default-features = false }
+ffmpeg-next = { version = "8.0.0", features = ["build"] }
 libc = "0.2"
 log = "0.4"
 rtp-types = "0.1"

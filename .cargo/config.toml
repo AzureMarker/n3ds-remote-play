@@ -4,3 +4,7 @@
 # Also, we cannot use build-std with the per-package-target feature due to a bug:
 # https://github.com/rust-lang/cargo/issues/11898
 build-std = ["std", "test"]
+
+[env]
+PKG_CONFIG_SYSROOT_DIR_armv6k-nintendo-3ds="/opt/devkitpro/devkitARM/arm-none-eabi"
+CC_armv6k-nintendo-3ds="/opt/devkitpro/devkitARM/bin/arm-none-eabi-gcc"
