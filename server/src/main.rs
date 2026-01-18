@@ -213,22 +213,27 @@ async fn handle_connection(
         encoder.set_width(N3DS_TOP_HEIGHT);
         encoder.set_height(N3DS_TOP_WIDTH);
         encoder.set_format(ffmpeg::format::Pixel::YUV420P);
-        // MPEG-1 has a restricted set of supported framerates; 5/1 is rejected.
-        // We still *send* frames at 5 fps by pacing the loop, but configure the encoder
-        // to a supported rate (25 fps) and set PTS in 5-frame steps.
+        // MPEG-1 has a restricted set of supported framerates; For example, 5 fps = 5/1 is rejected.
+        // We still *send* frames at EFFECTIVE_FPS by pacing the loop, but configure the encoder
+        // to a supported rate (25 fps) and set PTS in multi-frame steps.
         const ENCODER_FPS_NUM: i32 = 25;
         const ENCODER_FPS_DEN: i32 = 1;
-        const EFFECTIVE_FPS: i64 = 5;
-        const PTS_STEP: i64 = (ENCODER_FPS_NUM as i64 / EFFECTIVE_FPS);
+        // Effective real send rate. Higher FPS reduces baseline 'frame interval' latency.
+        // We still configure MPEG-1 to 25 fps (a supported rate) and step PTS accordingly.
+        const EFFECTIVE_FPS: i64 = 12;
         encoder.set_frame_rate(Some((ENCODER_FPS_NUM, ENCODER_FPS_DEN)));
         encoder.set_time_base((ENCODER_FPS_DEN, ENCODER_FPS_NUM));
         encoder.set_bit_rate(500_000); // 500 kbps
-        encoder.set_gop(12); // Group of pictures size
+        // Lower-latency settings:
+        // - Smaller GOP => more frequent I-frames => recover faster from scene changes
+        // - No B-frames => no frame reordering delay
+        encoder.set_gop(5);
+        encoder.set_max_b_frames(0);
 
         let mut encoder = encoder.open().expect("Failed to open encoder");
 
         // FFmpeg filtergraph pipeline:
-        // BGRA capture -> scale to 400x240 -> transpose (90° clockwise) -> format=yuv420p
+        // RGBA capture -> scale to 400x240 -> transpose (90° clockwise) -> format=yuv420p
         // Resulting frame is 240x400 yuv420p, exactly what the MPEG-1 encoder supports.
         // NOTE: We intentionally allocate the *input* frame per iteration. `buffersrc.add()`
         // uses `av_buffersrc_add_frame()` which takes ownership of reference-counted buffers
@@ -241,8 +246,8 @@ async fn handle_connection(
 
         let mut graph = ffmpeg::filter::Graph::new();
         let args = format!(
-            "video_size={}x{}:pix_fmt=bgra:time_base=1/5:pixel_aspect=1/1",
-            cap_w, cap_h,
+            "video_size={}x{}:pix_fmt=rgba:time_base=1/{}:pixel_aspect=1/1",
+            cap_w, cap_h, EFFECTIVE_FPS,
         );
 
         let mut buffersrc = graph
@@ -267,7 +272,9 @@ async fn handle_connection(
             .expect("Failed to parse filter graph");
         graph.validate().expect("Failed to validate filter graph");
 
-        let mut frame_index: i64 = 0;
+        // Fractional PTS accumulator numerator (ticks * EFFECTIVE_FPS).
+        // Each output frame advances pts_numer by ENCODER_FPS_I64, and pts is computed as pts_numer / EFFECTIVE_FPS.
+        let mut pts_numerator: i64 = 0;
 
         let mut next_frame_time = Instant::now();
         let mut sequence_number: u16 = 0;
@@ -276,7 +283,7 @@ async fn handle_connection(
         'outer: loop {
             let mut last_frame = None;
             loop {
-                // Sleep to limit the frame rate (5 fps for now)
+                // Sleep to limit the frame rate
                 select! {
                     biased;
                     _ = &mut exit_receiver => {
@@ -284,7 +291,7 @@ async fn handle_connection(
                         break 'outer;
                     }
                     _ = tokio::time::sleep_until(tokio::time::Instant::from_std(next_frame_time)) => {
-                        next_frame_time += Duration::from_millis(200);
+                        next_frame_time += Duration::from_millis(1000 / EFFECTIVE_FPS as u64);
                         break;
                     }
                     frame = raw_video_receiver.recv() => {
@@ -303,21 +310,22 @@ async fn handle_connection(
                 Some(frame) => {
                     let frame_processing_start = Instant::now();
 
-                    // PTS is in encoder time_base units (1/25). We advance by PTS_STEP ticks per frame
-                    // to keep 5 fps real-time pacing.
-                    let pts = frame_index * PTS_STEP;
+                    // PTS is in encoder time_base units (1/ENCODER_FPS_NUM). We advance it fractionally
+                    // to match EFFECTIVE_FPS.
+                    let pts = pts_numerator / EFFECTIVE_FPS;
+                    pts_numerator = pts_numerator.saturating_add(ENCODER_FPS_NUM as i64);
 
-                    // Capture is BGRA (xcap). Allocate a fresh frame, fill it, then submit it.
+                    // Capture is RGBA. Allocate a fresh frame, fill it, then submit it.
                     // The filter graph takes ownership of refcounted frame buffers.
-                    let mut src_bgra =
-                        ffmpeg::util::frame::Video::new(ffmpeg::format::Pixel::BGRA, cap_w, cap_h);
-                    copy_packed_into_frame(&mut src_bgra, 0, cap_w, cap_h, 4, &frame.raw);
-                    src_bgra.set_pts(Some(pts));
+                    let mut src_rgba =
+                        ffmpeg::util::frame::Video::new(ffmpeg::format::Pixel::RGBA, cap_w, cap_h);
+                    copy_packed_into_frame(&mut src_rgba, 0, cap_w, cap_h, 4, &frame.raw);
+                    src_rgba.set_pts(Some(pts));
 
                     // Push through filter graph (scale+transpose+format)
                     buffersrc
                         .source()
-                        .add(&src_bgra)
+                        .add(&src_rgba)
                         .expect("Failed to push frame into filter graph");
 
                     // Drain exactly one output frame for this input.
@@ -326,10 +334,8 @@ async fn handle_connection(
                         .frame(&mut yuv420p)
                         .expect("Failed to pull frame from filter graph");
 
-                    // PTS is in encoder time_base units (1/25). We advance by 5 ticks per frame
-                    // to keep 5 fps real-time pacing.
+                    // Keep PTS consistent through the graph and encoder.
                     yuv420p.set_pts(Some(pts));
-                    frame_index += 1;
 
                     // Encode the frame
                     let mut mpeg_packets = Vec::new();

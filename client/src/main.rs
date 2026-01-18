@@ -97,7 +97,6 @@ struct RemotePlayClient<'gfx> {
     hid: Hid,
     // connection: TcpStream,
     // udp_connection: UdpSocket,
-    frame_recv_start: Option<Instant>,
     last_cpp_input: CirclePadProInputResponse,
 }
 
@@ -125,7 +124,6 @@ impl<'gfx> RemotePlayClient<'gfx> {
             // connection,
             // udp_connection,
             // frame_reassembler: Box::new(video_stream::RtpFrameReassembler::new()),
-            frame_recv_start: None,
             last_cpp_input: CirclePadProInputResponse::default(),
         }
     }
@@ -351,16 +349,30 @@ impl<'gfx> RemotePlayClient<'gfx> {
         // Drain queued MPEG packets, decode them, and display the most recent decoded frame.
         let frame_decode_start = Instant::now();
         let mut latest_frame: Option<(Vec<u8>, usize, Duration)> = None;
+        let mut decoded_frames_this_tick: usize = 0;
 
         while let Ok((packet, recv_duration)) = packet_receiver.try_recv() {
             match mpeg_decoder.decode_mpeg_packet(&packet) {
-                Ok(Some(frame)) => latest_frame = Some((frame, packet.len(), recv_duration)),
-                Ok(None) => {}
+                Ok(Some(frame)) => {
+                    decoded_frames_this_tick += 1;
+                    latest_frame = Some((frame, packet.len(), recv_duration));
+                }
+                Ok(None) => {
+                    log::warn!("MPEG packet did not produce a complete frame");
+                }
                 Err(e) => {
                     log::error!("MPEG decode error: {e}");
                     break;
                 }
             }
+        }
+
+        // If we're decoding multiple frames per vblank tick, we are falling behind.
+        // Keep latency low by displaying only the newest frame, but don't spam logs.
+        if decoded_frames_this_tick > 1 {
+            log::warn!(
+                "Behind on video decode: decoded {decoded_frames_this_tick} frames in one tick (showing newest)"
+            );
         }
 
         let Some((frame, latest_packet_size, frame_recv_duration)) = latest_frame else {
@@ -409,8 +421,6 @@ impl<'gfx> RemotePlayClient<'gfx> {
             frame_decode_start.elapsed().as_millis()
         );
         log::debug!("");
-
-        self.frame_recv_start = None;
     }
 
     /// Detect and enable 3DS Circle Pad Pro (or continue without it if user skips)
