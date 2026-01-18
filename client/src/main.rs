@@ -2,6 +2,7 @@ mod thread;
 mod video_stream;
 
 use crate::thread::spawn_system_core_thread;
+use crate::video_stream::BgrFrameView;
 use bincode::Options;
 use ctru::applets::swkbd;
 use ctru::applets::swkbd::SoftwareKeyboard;
@@ -167,7 +168,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
 
         // Set up system core thread to read network data in parallel
         let (input_sender, input_receiver) = std::sync::mpsc::channel();
-        let (packet_sender, packet_receiver) = std::sync::mpsc::channel();
+        let (packet_sender, packet_receiver) = std::sync::mpsc::sync_channel(2);
         let result = unsafe {
             spawn_system_core_thread(&mut self.apt, move || {
                 Self::run_system_thread(connection, udp_connection, input_receiver, packet_sender)
@@ -240,7 +241,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
         mut connection: TcpStream,
         mut udp_connection: UdpSocket,
         input_reader: std::sync::mpsc::Receiver<InputState>,
-        packet_writer: std::sync::mpsc::Sender<(Vec<u8>, Duration)>,
+        packet_writer: std::sync::mpsc::SyncSender<(Vec<u8>, Duration)>,
     ) {
         let mut packet_reassembler = video_stream::MpegPacketReassembler::new();
         let mut tcp_recv_buffer = vec![0u8; 70_000];
@@ -298,9 +299,17 @@ impl<'gfx> RemotePlayClient<'gfx> {
                     let frame_recv_duration = frame_recv_start.unwrap().elapsed();
                     frame_recv_start = None;
 
-                    if let Err(e) = packet_writer.send((mpeg_packet, frame_recv_duration)) {
-                        log::error!("Packet writer channel closed: {e}");
-                        break;
+                    match packet_writer.try_send((mpeg_packet, frame_recv_duration)) {
+                        Ok(()) => {
+                            // Successfully sent packet
+                        }
+                        Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                            log::warn!("Packet writer channel full, dropping packet");
+                        }
+                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                            log::error!("Packet writer channel closed");
+                            break;
+                        }
                     }
                 }
                 Ok(None) => {
@@ -348,63 +357,44 @@ impl<'gfx> RemotePlayClient<'gfx> {
     ) {
         // Drain queued MPEG packets, decode them, and display the most recent decoded frame.
         let frame_decode_start = Instant::now();
-        let mut latest_frame: Option<(Vec<u8>, usize, Duration)> = None;
-        let mut decoded_frames_this_tick: usize = 0;
+        let frame: BgrFrameView<'_>;
+        let packet_size: usize;
+        let frame_recv_duration: Duration;
 
-        while let Ok((packet, recv_duration)) = packet_receiver.try_recv() {
+        if let Ok((packet, recv_duration)) = packet_receiver.try_recv() {
+            packet_size = packet.len();
+            frame_recv_duration = recv_duration;
+
             match mpeg_decoder.decode_mpeg_packet(&packet) {
-                Ok(Some(frame)) => {
-                    decoded_frames_this_tick += 1;
-                    latest_frame = Some((frame, packet.len(), recv_duration));
+                Ok(Some(frame_view)) => {
+                    frame = frame_view;
                 }
                 Ok(None) => {
-                    log::warn!("MPEG packet did not produce a complete frame");
+                    // Decoder needs more input before it can output a frame.
+                    return;
                 }
                 Err(e) => {
                     log::error!("MPEG decode error: {e}");
-                    break;
+                    return;
                 }
             }
-        }
-
-        // If we're decoding multiple frames per vblank tick, we are falling behind.
-        // Keep latency low by displaying only the newest frame, but don't spam logs.
-        if decoded_frames_this_tick > 1 {
-            log::warn!(
-                "Behind on video decode: decoded {decoded_frames_this_tick} frames in one tick (showing newest)"
-            );
-        }
-
-        let Some((frame, latest_packet_size, frame_recv_duration)) = latest_frame else {
+        } else {
+            // No packets available.
             return;
-        };
+        }
 
-        // fn process_video_stream(&mut self, udp_recv_buffer: &mut [u8]) {
-        // let frame_read_start = Instant::now();
-
-        // // let udp_packet = match self.udp_connection.recv(udp_recv_buffer) {
-        // let udp_packet = match self.connection.read(udp_recv_buffer) {
-        //     Ok(datagram_size) => &udp_recv_buffer[..datagram_size],
-        //     Err(e) => {
-        //         if e.kind() != std::io::ErrorKind::WouldBlock {
-        //             log::error!(
-        //                 "Error while checking for UDP packet: {e}, kind = {}",
-        //                 e.kind()
-        //             );
-        //         }
-        //         return;
-        //     }
-        // };
-
-        // Write the frame
+        // Write the frame (row-by-row because FFmpeg may pad stride for alignment).
         let frame_write_start = Instant::now();
         unsafe {
-            self.gfx
-                .top_screen
-                .borrow_mut()
-                .raw_framebuffer()
-                .ptr
-                .copy_from(frame.as_ptr(), frame.len());
+            let fb = self.gfx.top_screen.borrow_mut().raw_framebuffer().ptr;
+
+            let row_bytes = frame.width * 3;
+            for y in 0..frame.height {
+                let src_off = y * frame.stride;
+                let dst_off = y * row_bytes;
+                fb.add(dst_off)
+                    .copy_from(frame.data.as_ptr().add(src_off), row_bytes);
+            }
         }
         let frame_flush_start = Instant::now();
         let mut top_screen = self.gfx.top_screen.borrow_mut();
@@ -416,7 +406,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
         log::debug!("Write: {frame_write_duration:?}, Flush: {frame_flush_duration:?}");
         log::info!(
             "MPEG: {:5} Rx: {:3?}ms De: {:3?}ms",
-            latest_packet_size,
+            packet_size,
             frame_recv_duration.as_millis(),
             frame_decode_start.elapsed().as_millis()
         );

@@ -215,15 +215,15 @@ async fn handle_connection(
         encoder.set_format(ffmpeg::format::Pixel::YUV420P);
         // MPEG-1 has a restricted set of supported framerates; For example, 5 fps = 5/1 is rejected.
         // We still *send* frames at EFFECTIVE_FPS by pacing the loop, but configure the encoder
-        // to a supported rate (25 fps) and set PTS in multi-frame steps.
+        // to a supported rate (ENCODER_FPS_NUM) and set PTS in multi-frame steps.
         const ENCODER_FPS_NUM: i32 = 25;
         const ENCODER_FPS_DEN: i32 = 1;
         // Effective real send rate. Higher FPS reduces baseline 'frame interval' latency.
-        // We still configure MPEG-1 to 25 fps (a supported rate) and step PTS accordingly.
-        const EFFECTIVE_FPS: i64 = 12;
+        // We still configure MPEG-1 to ENCODER_FPS_NUM (a supported rate) and step PTS accordingly.
+        const EFFECTIVE_FPS: i64 = 25;
         encoder.set_frame_rate(Some((ENCODER_FPS_NUM, ENCODER_FPS_DEN)));
         encoder.set_time_base((ENCODER_FPS_DEN, ENCODER_FPS_NUM));
-        encoder.set_bit_rate(500_000); // 500 kbps
+        encoder.set_bit_rate(1_000_000); // 1000 kbps
         // Lower-latency settings:
         // - Smaller GOP => more frequent I-frames => recover faster from scene changes
         // - No B-frames => no frame reordering delay

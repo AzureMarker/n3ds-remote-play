@@ -1,4 +1,5 @@
 use anyhow::anyhow;
+use ffmpeg::software::scaling as sws;
 use ffmpeg_next as ffmpeg;
 use rtp_types::RtpPacket;
 use std::cmp::min;
@@ -223,8 +224,18 @@ impl MpegPacketReassembler {
 pub struct Mpeg1Decoder {
     decoder: ffmpeg::codec::decoder::Video,
     video_frame: ffmpeg::util::frame::Video,
+    /// Software scaler to convert decoded YUV420P into packed BGR for the framebuffer.
+    scaler: sws::context::Context,
+    bgr_frame: ffmpeg::util::frame::Video,
     /// One-time sanity log to confirm decoder output matches framebuffer expectations.
     logged_format: bool,
+}
+
+pub struct BgrFrameView<'a> {
+    pub data: &'a [u8],
+    pub width: usize,
+    pub height: usize,
+    pub stride: usize,
 }
 
 impl Mpeg1Decoder {
@@ -240,16 +251,42 @@ impl Mpeg1Decoder {
         let decoder = context.decoder().video()?;
         let video_frame = ffmpeg::util::frame::Video::empty();
 
+        // The server always sends frames scaled/rotated to the 3DS top screen.
+        // Decoded MPEG frames are 240x400 YUV420P.
+        const FRAME_W: u32 = 240;
+        const FRAME_H: u32 = 400;
+        let scaler = sws::context::Context::get(
+            ffmpeg::format::Pixel::YUV420P,
+            FRAME_W,
+            FRAME_H,
+            ffmpeg::format::Pixel::BGR24,
+            FRAME_W,
+            FRAME_H,
+            sws::flag::Flags::FAST_BILINEAR,
+        )
+        .map_err(|e| anyhow!("Failed to create swscale context: {e}"))?;
+
+        let bgr_frame =
+            ffmpeg::util::frame::Video::new(ffmpeg::format::Pixel::BGR24, FRAME_W, FRAME_H);
+
         Ok(Self {
             decoder,
             video_frame,
+            scaler,
+            bgr_frame,
             logged_format: false,
         })
     }
 
     /// Decode a single MPEG packet payload (already framed by the TCP reassembler).
-    /// Returns the first decoded frame (BGR24) produced by this packet (if any); otherwise None.
-    pub fn decode_mpeg_packet(&mut self, payload: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
+    ///
+    /// Returns:
+    /// - Ok(Some(frame)) when a decoded+converted frame is available
+    /// - Ok(None) when the decoder needs more input (transient: EAGAIN/EOF/etc)
+    pub fn decode_mpeg_packet(
+        &mut self,
+        payload: &[u8],
+    ) -> anyhow::Result<Option<BgrFrameView<'_>>> {
         let packet = ffmpeg::codec::packet::Packet::borrow(payload);
         self.decoder.send_packet(&packet)?;
 
@@ -269,84 +306,45 @@ impl Mpeg1Decoder {
                     self.logged_format = true;
                 }
 
-                // Return the first decoded frame immediately.
-                Ok(Some(yuv420p_to_bgr24(&self.video_frame)?))
+                // Convert decoded YUV420P to BGR24 using swscale.
+                self.scaler
+                    .run(&self.video_frame, &mut self.bgr_frame)
+                    .map_err(|e| anyhow!("swscale conversion failed: {e}"))?;
+
+                let width = self.bgr_frame.width() as usize;
+                let height = self.bgr_frame.height() as usize;
+                let stride = self.bgr_frame.stride(0);
+                let data = self.bgr_frame.data(0);
+                if width == 0 || height == 0 || stride == 0 || data.is_empty() {
+                    return Err(anyhow!("swscale produced empty/invalid BGR frame"));
+                }
+
+                // Ensure the buffer is large enough for row-by-row access.
+                let min_needed = stride.saturating_mul(height);
+                if data.len() < min_needed {
+                    return Err(anyhow!(
+                        "swscale produced short buffer: got {}, need at least {}",
+                        data.len(),
+                        min_needed
+                    ));
+                }
+
+                Ok(Some(BgrFrameView {
+                    data,
+                    width,
+                    height,
+                    stride,
+                }))
             }
-            Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::sys::EAGAIN => Ok(None),
+            Err(ffmpeg::Error::Other { errno })
+                if errno == ffmpeg::sys::EAGAIN || errno == ffmpeg::sys::EOF =>
+            {
+                Ok(None)
+            }
+            // Some embedded/libc errno tables are odd; treat the common devkitARM value we see
+            // as transient rather than fatal.
+            Err(ffmpeg::Error::Other { errno }) if errno == libc::ESRCH => Ok(None),
             Err(e) => Err(anyhow!("Decoding error: {}", e)),
         }
     }
-}
-
-fn yuv420p_to_bgr24(frame: &ffmpeg::util::frame::Video) -> anyhow::Result<Vec<u8>> {
-    use ffmpeg::format::Pixel;
-
-    // Prefer a strict format match, but don't fail hard if the wrapper reports Pixel::None.
-    let fmt = frame.format();
-    if fmt != Pixel::YUV420P {
-        static WARNED_FMT_MISMATCH: std::sync::Once = std::sync::Once::new();
-        WARNED_FMT_MISMATCH.call_once(|| {
-            log::warn!("Decoder reported pixel format {:?}; assuming YUV420P", fmt);
-        });
-    }
-
-    let w = frame.width() as usize;
-    let h = frame.height() as usize;
-    if w == 0 || h == 0 {
-        return Err(anyhow!("Decoded frame has invalid size {}x{}", w, h));
-    }
-
-    let y_plane = frame.data(0);
-    let u_plane = frame.data(1);
-    let v_plane = frame.data(2);
-
-    let y_stride = frame.stride(0);
-    let u_stride = frame.stride(1);
-    let v_stride = frame.stride(2);
-    if y_stride == 0 || u_stride == 0 || v_stride == 0 {
-        return Err(anyhow!("Decoded frame has invalid strides"));
-    }
-
-    if y_plane.is_empty() || u_plane.is_empty() || v_plane.is_empty() {
-        return Err(anyhow!("Decoded frame missing plane data"));
-    }
-
-    // Output packed BGR
-    let mut out = vec![0u8; w * h * 3];
-
-    // BT.601 limited-range conversion (common for MPEG-1/2)
-    // Integer approximation to keep it fast on 3DS.
-    for y in 0..h {
-        let y_row = y * y_stride;
-        let uv_row = (y / 2) * u_stride;
-        let uv_row_v = (y / 2) * v_stride;
-
-        for x in 0..w {
-            let yy = y_plane[y_row + x] as i32;
-            let uu = u_plane[uv_row + (x / 2)] as i32;
-            let vv = v_plane[uv_row_v + (x / 2)] as i32;
-
-            // Convert to signed/offset domain. (16..235) luma, (16..240) chroma
-            let c = yy - 16;
-            let d = uu - 128;
-            let e = vv - 128;
-
-            // Scale/convert
-            let mut r = (298 * c + 409 * e + 128) >> 8;
-            let mut g = (298 * c - 100 * d - 208 * e + 128) >> 8;
-            let mut b = (298 * c + 516 * d + 128) >> 8;
-
-            // Clamp
-            r = r.clamp(0, 255);
-            g = g.clamp(0, 255);
-            b = b.clamp(0, 255);
-
-            let o = (y * w + x) * 3;
-            out[o] = b as u8;
-            out[o + 1] = g as u8;
-            out[o + 2] = r as u8;
-        }
-    }
-
-    Ok(out)
 }
