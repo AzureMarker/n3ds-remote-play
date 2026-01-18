@@ -2,7 +2,6 @@ mod thread;
 mod video_stream;
 
 use crate::thread::spawn_system_core_thread;
-use crate::video_stream::FrameReassembler;
 use bincode::Options;
 use ctru::applets::swkbd;
 use ctru::applets::swkbd::SoftwareKeyboard;
@@ -20,8 +19,6 @@ use std::panic;
 use std::str::FromStr;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
-use zune_jpeg::zune_core::bytestream::ZCursor;
-use zune_jpeg::zune_core::colorspace::ColorSpace;
 
 const PACKET_INFO_SIZE: usize = 8;
 const MAX_PACKET_SIZE: usize = 32;
@@ -64,7 +61,7 @@ fn main() {
     //         return;
     //     }
     // };
-    let server_ip = Ipv4Addr::new(192, 168, 1, 160);
+    let server_ip = Ipv4Addr::new(10, 0, 0, 132);
 
     let mut remote_play_client = RemotePlayClient::new(apt, &gfx, ir_user, hid);
 
@@ -155,6 +152,10 @@ impl<'gfx> RemotePlayClient<'gfx> {
         udp_connection.set_nonblocking(true).unwrap();
         log::info!("Connected to remote play server at {server_ip}.");
 
+        // Main thread owns the MPEG decoder; system thread only reassembles length-prefixed packets.
+        let mut mpeg_decoder =
+            video_stream::Mpeg1Decoder::new().expect("Failed to create MPEG1 decoder");
+
         self.gfx.top_screen.borrow_mut().set_double_buffering(false);
         self.gfx.top_screen.borrow_mut().swap_buffers();
         // gfx.top_screen.borrow_mut().set_wide_mode(true);
@@ -166,12 +167,12 @@ impl<'gfx> RemotePlayClient<'gfx> {
             .get_recv_event()
             .expect("Couldn't get ir:USER recv event");
 
-        // Set up system core thread to read frames over network in parallel
+        // Set up system core thread to read network data in parallel
         let (input_sender, input_receiver) = std::sync::mpsc::channel();
-        let (frame_sender, frame_receiver) = std::sync::mpsc::channel();
+        let (packet_sender, packet_receiver) = std::sync::mpsc::channel();
         let result = unsafe {
             spawn_system_core_thread(&mut self.apt, move || {
-                Self::run_system_thread(connection, udp_connection, input_receiver, frame_sender)
+                Self::run_system_thread(connection, udp_connection, input_receiver, packet_sender)
             })
         };
         let Ok(system_thread) = result else {
@@ -228,10 +229,8 @@ impl<'gfx> RemotePlayClient<'gfx> {
                 break;
             }
 
-            // Check if we've received a frame from the PC
-            if let Ok((frame, recv_duration)) = frame_receiver.try_recv() {
-                self.process_video_stream(frame, recv_duration);
-            }
+            // Drain/decode any received MPEG packets on the main thread.
+            self.process_video_stream(&mut mpeg_decoder, &packet_receiver);
 
             self.gfx.wait_for_vblank();
         }
@@ -243,10 +242,9 @@ impl<'gfx> RemotePlayClient<'gfx> {
         mut connection: TcpStream,
         mut udp_connection: UdpSocket,
         input_reader: std::sync::mpsc::Receiver<InputState>,
-        frame_writer: std::sync::mpsc::Sender<(Vec<u8>, Duration)>,
+        packet_writer: std::sync::mpsc::Sender<(Vec<u8>, Duration)>,
     ) {
-        let mut frame_reassembler = video_stream::Mpeg1FrameReassembler::new()
-            .expect("Failed to create MPEG1 frame reassembler");
+        let mut packet_reassembler = video_stream::MpegPacketReassembler::new();
         let mut tcp_recv_buffer = vec![0u8; 70_000];
         let mut frame_recv_start: Option<Instant> = None;
         loop {
@@ -272,10 +270,11 @@ impl<'gfx> RemotePlayClient<'gfx> {
             };
 
             // Read frame data from TCP connection
+            let possible_frame_recv_start = Instant::now();
             let bytes_read = match connection.read(&mut tcp_recv_buffer) {
                 Ok(size) => {
                     if frame_recv_start.is_none() {
-                        frame_recv_start = Some(Instant::now());
+                        frame_recv_start = Some(possible_frame_recv_start);
                     }
                     size
                 }
@@ -296,22 +295,21 @@ impl<'gfx> RemotePlayClient<'gfx> {
             }
 
             let packet_data = &tcp_recv_buffer[..bytes_read];
-            match frame_reassembler.process_packet(packet_data) {
-                Ok(Some(frame)) => {
-                    // Send complete frame to main thread
+            match packet_reassembler.push_chunk(packet_data) {
+                Ok(Some(mpeg_packet)) => {
                     let frame_recv_duration = frame_recv_start.unwrap().elapsed();
                     frame_recv_start = None;
 
-                    if let Err(e) = frame_writer.send((frame, frame_recv_duration)) {
-                        log::error!("Frame writer channel closed: {e}");
+                    if let Err(e) = packet_writer.send((mpeg_packet, frame_recv_duration)) {
+                        log::error!("Packet writer channel closed: {e}");
                         break;
                     }
                 }
                 Ok(None) => {
-                    // Frame not complete yet
+                    // Need more TCP data.
                 }
                 Err(e) => {
-                    log::error!("Error while processing TCP packet: {e}");
+                    log::error!("Error while reassembling MPEG packet: {e}");
                     break;
                 }
             }
@@ -345,10 +343,33 @@ impl<'gfx> RemotePlayClient<'gfx> {
             .expect("Failed to request input polling from CPP");
     }
 
-    fn process_video_stream(&mut self, jpeg_frame: Vec<u8>, frame_recv_duration: Duration) {
+    fn process_video_stream(
+        &mut self,
+        mpeg_decoder: &mut video_stream::Mpeg1Decoder,
+        packet_receiver: &std::sync::mpsc::Receiver<(Vec<u8>, Duration)>,
+    ) {
+        // Drain queued MPEG packets, decode them, and display the most recent decoded frame.
+        let frame_decode_start = Instant::now();
+        let mut latest_frame: Option<(Vec<u8>, usize, Duration)> = None;
+
+        while let Ok((packet, recv_duration)) = packet_receiver.try_recv() {
+            match mpeg_decoder.decode_mpeg_packet(&packet) {
+                Ok(Some(frame)) => latest_frame = Some((frame, packet.len(), recv_duration)),
+                Ok(None) => {}
+                Err(e) => {
+                    log::error!("MPEG decode error: {e}");
+                    break;
+                }
+            }
+        }
+
+        let Some((frame, latest_packet_size, frame_recv_duration)) = latest_frame else {
+            return;
+        };
+
         // fn process_video_stream(&mut self, udp_recv_buffer: &mut [u8]) {
         // let frame_read_start = Instant::now();
-        //
+
         // // let udp_packet = match self.udp_connection.recv(udp_recv_buffer) {
         // let udp_packet = match self.connection.read(udp_recv_buffer) {
         //     Ok(datagram_size) => &udp_recv_buffer[..datagram_size],
@@ -362,48 +383,6 @@ impl<'gfx> RemotePlayClient<'gfx> {
         //         return;
         //     }
         // };
-        //
-        let frame_decode_start = Instant::now();
-        // if self.frame_recv_start.is_none() {
-        //     self.frame_recv_start = Some(frame_decode_start);
-        // }
-        // log::debug!(
-        //     "Got datagram of size {} bytes, duration: {:?}",
-        //     udp_packet.len(),
-        //     frame_decode_start.duration_since(frame_read_start)
-        // );
-        // let jpeg_frame = match self.frame_reassembler.process_packet(udp_packet) {
-        //     Ok(Some(jpeg_frame)) => {
-        //         log::debug!("Reassembled frame of size: {}", jpeg_frame.len());
-        //         jpeg_frame
-        //     }
-        //     Ok(None) => {
-        //         // Frame not complete yet
-        //         return;
-        //     }
-        //     Err(e) => {
-        //         log::error!("Error while processing RTP packet: {e}");
-        //         return;
-        //     }
-        // };
-
-        let cursor = ZCursor::new(jpeg_frame.as_slice());
-        let jpeg_decoder_options = zune_jpeg::zune_core::options::DecoderOptions::new_fast()
-            .jpeg_set_out_colorspace(ColorSpace::BGR);
-        let mut jpeg_decoder =
-            zune_jpeg::JpegDecoder::new_with_options(cursor, jpeg_decoder_options);
-        let frame = match jpeg_decoder.decode() {
-            Ok(frame) => frame,
-            Err(e) => {
-                log::error!("\x1b[31;1mError while decoding JPEG frame: {e}\x1b0m");
-                return;
-            }
-        };
-        log::debug!(
-            "Decoded frame with size: {}, duration: {:?}",
-            frame.len(),
-            frame_decode_start.elapsed()
-        );
 
         // Write the frame
         let frame_write_start = Instant::now();
@@ -424,11 +403,8 @@ impl<'gfx> RemotePlayClient<'gfx> {
         let frame_write_duration = frame_flush_start.duration_since(frame_write_start);
         log::debug!("Write: {frame_write_duration:?}, Flush: {frame_flush_duration:?}");
         log::info!(
-            "JPEG: {:5} Rx: {:3?}ms De: {:3?}ms",
-            jpeg_frame.len(),
-            // frame_decode_start
-            //     .duration_since(self.frame_recv_start.unwrap())
-            //     .as_millis(),
+            "MPEG: {:5} Rx: {:3?}ms De: {:3?}ms",
+            latest_packet_size,
             frame_recv_duration.as_millis(),
             frame_decode_start.elapsed().as_millis()
         );

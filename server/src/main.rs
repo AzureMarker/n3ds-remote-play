@@ -7,13 +7,12 @@ mod virtual_device;
 
 use crate::virtual_device::{VirtualDevice, VirtualDeviceFactory};
 use bincode::Options;
+use ffmpeg_next as ffmpeg;
 use futures::StreamExt;
-use image::buffer::ConvertBuffer;
 use n3ds_remote_play_common::InputState;
 use rtp_types::RtpPacketBuilder;
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
@@ -26,7 +25,6 @@ use tokio_stream::wrappers::TcpListenerStream;
 use tracing::level_filters::LevelFilter;
 use tracing::{debug, error, info, trace, warn};
 use tracing_subscriber::FmtSubscriber;
-use ffmpeg_next as ffmpeg;
 
 const CLIENT_CONNECTION_TIMEOUT: Duration = Duration::from_secs(30);
 const N3DS_TOP_WIDTH: u32 = 400;
@@ -182,9 +180,8 @@ async fn handle_connection(
     let mut start_sender = Some(start_sender);
     let (exit_sender, mut exit_receiver) = tokio::sync::oneshot::channel();
     let display_task_handle = spawn_local(async move {
-        let width = NonZeroU32::new(display.width().unwrap()).unwrap();
-        let height = NonZeroU32::new(display.height().unwrap()).unwrap();
-        let mut resizer = fast_image_resize::Resizer::new(fast_image_resize::ResizeAlg::Nearest);
+        let cap_w = display.width().unwrap() as u32;
+        let cap_h = display.height().unwrap() as u32;
 
         // Wait for the 3DS to connect
         if let Err(e) = start_receiver.await {
@@ -215,13 +212,60 @@ async fn handle_connection(
 
         encoder.set_width(N3DS_TOP_HEIGHT);
         encoder.set_height(N3DS_TOP_WIDTH);
-        encoder.set_format(ffmpeg::format::Pixel::RGB24);
-        encoder.set_frame_rate(Some((5, 1)));
-        encoder.set_time_base((1, 5));
-        encoder.set_bit_rate(500000); // 500 kbps
+        encoder.set_format(ffmpeg::format::Pixel::YUV420P);
+        // MPEG-1 has a restricted set of supported framerates; 5/1 is rejected.
+        // We still *send* frames at 5 fps by pacing the loop, but configure the encoder
+        // to a supported rate (25 fps) and set PTS in 5-frame steps.
+        const ENCODER_FPS_NUM: i32 = 25;
+        const ENCODER_FPS_DEN: i32 = 1;
+        const EFFECTIVE_FPS: i64 = 5;
+        const PTS_STEP: i64 = (ENCODER_FPS_NUM as i64 / EFFECTIVE_FPS);
+        encoder.set_frame_rate(Some((ENCODER_FPS_NUM, ENCODER_FPS_DEN)));
+        encoder.set_time_base((ENCODER_FPS_DEN, ENCODER_FPS_NUM));
+        encoder.set_bit_rate(500_000); // 500 kbps
         encoder.set_gop(12); // Group of pictures size
 
-        let mut encoder = encoder.open_as(codec).expect("Failed to open encoder");
+        let mut encoder = encoder.open().expect("Failed to open encoder");
+
+        // FFmpeg filtergraph pipeline:
+        // BGRA capture -> scale to 400x240 -> transpose (90° clockwise) -> format=yuv420p
+        // Resulting frame is 240x400 yuv420p, exactly what the MPEG-1 encoder supports.
+        // NOTE: We intentionally allocate the *input* frame per iteration. `buffersrc.add()`
+        // uses `av_buffersrc_add_frame()` which takes ownership of reference-counted buffers
+        // and resets the input frame on success.
+        let mut yuv420p = ffmpeg::util::frame::Video::new(
+            ffmpeg::format::Pixel::YUV420P,
+            N3DS_TOP_HEIGHT,
+            N3DS_TOP_WIDTH,
+        );
+
+        let mut graph = ffmpeg::filter::Graph::new();
+        let args = format!(
+            "video_size={}x{}:pix_fmt=bgra:time_base=1/5:pixel_aspect=1/1",
+            cap_w, cap_h,
+        );
+
+        let mut buffersrc = graph
+            .add(&ffmpeg::filter::find("buffer").unwrap(), "in", &args)
+            .expect("Failed to create buffer source");
+        let mut buffersink = graph
+            .add(&ffmpeg::filter::find("buffersink").unwrap(), "out", "")
+            .expect("Failed to create buffer sink");
+        buffersink.set_pixel_format(ffmpeg::format::Pixel::YUV420P);
+
+        let chain = format!(
+            "scale={}:{}:flags=bilinear,transpose=1,format=yuv420p",
+            N3DS_TOP_WIDTH, N3DS_TOP_HEIGHT
+        );
+
+        graph
+            .output("in", 0)
+            .unwrap()
+            .input("out", 0)
+            .unwrap()
+            .parse(&chain)
+            .expect("Failed to parse filter graph");
+        graph.validate().expect("Failed to validate filter graph");
 
         let mut frame_index: i64 = 0;
 
@@ -258,67 +302,53 @@ async fn handle_connection(
             match last_frame {
                 Some(frame) => {
                     let frame_processing_start = Instant::now();
-                    // let original_frame =
-                    //     image::RgbaImage::from_vec(width.get(), height.get(), frame.raw.clone())
-                    //         .unwrap();
-                    // let mut tmp_original_file =
-                    //     BufWriter::new(File::create("test-original.png").unwrap());
-                    // original_frame
-                    //     .write_to(&mut tmp_original_file, image::ImageOutputFormat::Png)
-                    //     .unwrap();
 
-                    // First resize the image to fit the 3DS screen
-                    let frame_view = fast_image_resize::DynamicImageView::U8x4(
-                        fast_image_resize::ImageView::from_buffer(width, height, &frame.raw)
-                            .unwrap(),
-                    );
-                    let mut resized_frame = fast_image_resize::Image::new(
-                        NonZeroU32::new(N3DS_TOP_WIDTH).unwrap(),
-                        NonZeroU32::new(N3DS_TOP_HEIGHT).unwrap(),
-                        fast_image_resize::PixelType::U8x4,
-                    );
+                    // PTS is in encoder time_base units (1/25). We advance by PTS_STEP ticks per frame
+                    // to keep 5 fps real-time pacing.
+                    let pts = frame_index * PTS_STEP;
 
-                    resizer
-                        .resize(&frame_view, &mut resized_frame.view_mut())
-                        .unwrap();
+                    // Capture is BGRA (xcap). Allocate a fresh frame, fill it, then submit it.
+                    // The filter graph takes ownership of refcounted frame buffers.
+                    let mut src_bgra =
+                        ffmpeg::util::frame::Video::new(ffmpeg::format::Pixel::BGRA, cap_w, cap_h);
+                    copy_packed_into_frame(&mut src_bgra, 0, cap_w, cap_h, 4, &frame.raw);
+                    src_bgra.set_pts(Some(pts));
 
-                    // Convert from BGRA to BGR and rotate since the 3DS top screen is actually in portrait.
-                    let resized_frame = image::RgbaImage::from_vec(
-                        N3DS_TOP_WIDTH,
-                        N3DS_TOP_HEIGHT,
-                        resized_frame.into_vec(),
-                    )
-                    .unwrap();
-                    let resized_frame_bgr: image::RgbImage = resized_frame.convert();
-                    let rotated_frame = image::imageops::rotate90(&resized_frame_bgr);
+                    // Push through filter graph (scale+transpose+format)
+                    buffersrc
+                        .source()
+                        .add(&src_bgra)
+                        .expect("Failed to push frame into filter graph");
 
-                    // let mut jpeg_frame = Vec::new();
-                    // let mut jpeg_encoder =
-                    //     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut jpeg_frame, 80);
-                    // jpeg_encoder.encode_image(&rotated_frame).unwrap();
+                    // Drain exactly one output frame for this input.
+                    buffersink
+                        .sink()
+                        .frame(&mut yuv420p)
+                        .expect("Failed to pull frame from filter graph");
 
-                    // Encode frame to MPEG-1 using ffmpeg
-                    let mut video_frame = ffmpeg::util::frame::Video::new(
-                        ffmpeg::format::Pixel::BGR24,
-                        N3DS_TOP_HEIGHT,
-                        N3DS_TOP_WIDTH,
-                    );
-
-                    // Copy RGB data to ffmpeg frame
-                    let frame_data = rotated_frame.as_raw();
-                    video_frame.data_mut(0)[..frame_data.len()].copy_from_slice(frame_data);
-                    video_frame.set_pts(Some(frame_index));
+                    // PTS is in encoder time_base units (1/25). We advance by 5 ticks per frame
+                    // to keep 5 fps real-time pacing.
+                    yuv420p.set_pts(Some(pts));
                     frame_index += 1;
 
                     // Encode the frame
                     let mut mpeg_packets = Vec::new();
 
-                    if encoder.send_frame(&video_frame).is_ok() {
-                        loop  {
-                            let mut encoded_packet = ffmpeg::Packet::empty();
-                            if encoder.receive_packet(&mut encoded_packet).is_ok() {
+                    encoder
+                        .send_frame(&yuv420p)
+                        .expect("Failed to send frame to encoder");
+                    loop {
+                        let mut encoded_packet = ffmpeg::Packet::empty();
+                        match encoder.receive_packet(&mut encoded_packet) {
+                            Ok(()) => {
                                 mpeg_packets.push(encoded_packet);
-                            } else {
+                            }
+                            Err(ffmpeg::Error::Other { errno }) if errno == ffmpeg::sys::EAGAIN => {
+                                // No more packets available for now
+                                break;
+                            }
+                            Err(e) => {
+                                error!("Encoding error: {}", e);
                                 break;
                             }
                         }
@@ -456,6 +486,26 @@ async fn handle_connection(
     frame_receiver.close();
     display_task_handle.await.unwrap();
     info!("Closed connection with [{peer_addr}]");
+}
+
+fn copy_packed_into_frame(
+    dst: &mut ffmpeg::util::frame::Video,
+    plane: usize,
+    width: u32,
+    height: u32,
+    bytes_per_pixel: usize,
+    src: &[u8],
+) {
+    let dst_stride = dst.stride(plane);
+    let row_bytes = width as usize * bytes_per_pixel;
+    debug_assert!(src.len() >= row_bytes * height as usize);
+
+    for y in 0..height as usize {
+        let src_off = y * row_bytes;
+        let dst_off = y * dst_stride;
+        dst.data_mut(plane)[dst_off..dst_off + row_bytes]
+            .copy_from_slice(&src[src_off..src_off + row_bytes]);
+    }
 }
 
 const MTU: usize = 2500; // Maximum Transmission Unit size
