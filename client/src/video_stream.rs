@@ -185,39 +185,49 @@ impl FrameReassembler for TcpFrameReassembler {
     }
 }
 
+/// Reassembles MPEG packets from a TCP byte stream.
+/// MPEG packets are framed with a 4-byte big-endian length prefix.
 pub struct MpegPacketReassembler {
     tcp_buf: Vec<u8>,
 }
 
 impl MpegPacketReassembler {
+    // 1 MB max packet size to avoid OOM on malformed streams
+    const MAX_PACKET_LEN: usize = 1024 * 1024;
+
     pub fn new() -> Self {
         Self {
-            tcp_buf: Vec::new(),
+            tcp_buf: Vec::with_capacity(Self::MAX_PACKET_LEN),
         }
     }
 
-    /// Feed an arbitrary TCP chunk. Returns a complete MPEG packet payload when available.
-    /// Framing: [u32 length BE][payload]. Invalid length => hard error (non-recoverable desync).
+    /// Feed the next chunk read from the TCP stream.
+    /// Returns a complete MPEG packet payload when available.
+    /// Framing: (u32 length BE)(payload). Invalid length is a hard error (non-recoverable desync).
     pub fn push_chunk(&mut self, chunk: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
         self.tcp_buf.extend_from_slice(chunk);
 
-        if self.tcp_buf.len() < 4 {
+        let Some((length_bytes, packet_bytes)) = self.tcp_buf.split_first_chunk::<4>() else {
+            // Not enough data for length prefix yet
             return Ok(None);
-        }
+        };
 
-        let len = u32::from_be_bytes(self.tcp_buf[0..4].try_into().unwrap()) as usize;
-        const MAX_PACKET_LEN: usize = 2 * 1024 * 1024;
-        if len == 0 || len > MAX_PACKET_LEN {
+        let len = u32::from_be_bytes(*length_bytes) as usize;
+        if len == 0 || len > Self::MAX_PACKET_LEN {
             return Err(anyhow!("Bad MPEG packet length {len}; TCP stream desynced"));
         }
 
-        if self.tcp_buf.len() < 4 + len {
+        if packet_bytes.len() < len {
+            // Not enough data for full packet yet
             return Ok(None);
         }
 
-        let payload = self.tcp_buf[4..4 + len].to_vec();
+        let packet = packet_bytes.to_vec();
+        // The drain should not do any memory copies in the common case because there should not be
+        // any extra data after the completed packet yet.
         self.tcp_buf.drain(0..4 + len);
-        Ok(Some(payload))
+
+        Ok(Some(packet))
     }
 }
 
