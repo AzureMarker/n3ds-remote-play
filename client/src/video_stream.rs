@@ -9,8 +9,6 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 use tokio::io::{AsyncRead, ReadBuf};
-use tokio_util::bytes::BytesMut;
-use tokio_util::codec::Decoder;
 
 pub trait FrameReassembler {
     fn process_packet(&mut self, packet_buf: &[u8]) -> anyhow::Result<Option<Vec<u8>>>;
@@ -109,6 +107,7 @@ pin_project! {
     pub struct TcpStreamAsyncReader {
         inner: TcpStream,
         interval: tokio::time::Interval,
+        first_byte_time: Option<Instant>
     }
 }
 
@@ -118,7 +117,14 @@ impl TcpStreamAsyncReader {
         Self {
             inner: stream,
             interval: tokio::time::interval(Duration::from_millis(1)),
+            first_byte_time: None,
         }
+    }
+
+    /// Take the recorded time of the first byte read, if any.
+    /// This will reset the stored time to None.
+    pub fn take_first_byte_time(&mut self) -> Option<Instant> {
+        self.first_byte_time.take()
     }
 }
 
@@ -136,8 +142,15 @@ impl AsyncRead for TcpStreamAsyncReader {
         }
 
         let unfilled_buf = buf.initialize_unfilled();
+        let possible_first_byte_time = Instant::now();
+
         match this.inner.read(unfilled_buf) {
             Ok(n) => {
+                // Record the time of the first byte read
+                if n > 0 && this.first_byte_time.is_none() {
+                    *this.first_byte_time = Some(possible_first_byte_time);
+                }
+
                 buf.advance(n);
                 Poll::Ready(Ok(()))
             }
@@ -147,53 +160,6 @@ impl AsyncRead for TcpStreamAsyncReader {
                 Poll::Pending
             }
             Err(e) => Poll::Ready(Err(e)),
-        }
-    }
-}
-
-/// A Decoder wrapper that measures the time taken to decode each frame.
-/// The time is measured from the first byte of a new frame being received
-/// until the frame is fully decoded.
-pub struct TimedDecoder<D> {
-    inner: D,
-    frame_start: Option<Instant>,
-}
-
-impl<D> TimedDecoder<D> {
-    pub fn new(inner: D) -> Self {
-        Self {
-            inner,
-            frame_start: None,
-        }
-    }
-}
-
-impl<D: Decoder> Decoder for TimedDecoder<D> {
-    type Item = (D::Item, Duration); // Return the item AND the time it took
-    type Error = D::Error;
-
-    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
-        // If we have data but no start time, this is the FIRST chunk of a new frame
-        if !src.is_empty() && self.frame_start.is_none() {
-            self.frame_start = Some(Instant::now());
-        }
-
-        // Attempt to decode the frame using the inner codec
-        match self.inner.decode(src)? {
-            Some(frame) => {
-                // Frame is complete! Calculate elapsed time
-                let elapsed = self
-                    .frame_start
-                    .take()
-                    .map(|start| start.elapsed())
-                    .unwrap_or(Duration::ZERO);
-
-                Ok(Some((frame, elapsed)))
-            }
-            None => {
-                // Not enough data yet; return None so FramedRead reads more
-                Ok(None)
-            }
         }
     }
 }

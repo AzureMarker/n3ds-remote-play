@@ -2,7 +2,7 @@ mod thread;
 mod video_stream;
 
 use crate::thread::spawn_system_core_thread;
-use crate::video_stream::{BgrFrameView, TcpStreamAsyncReader, TimedDecoder};
+use crate::video_stream::{BgrFrameView, TcpStreamAsyncReader};
 use bincode::Options;
 use ctru::applets::swkbd;
 use ctru::applets::swkbd::SoftwareKeyboard;
@@ -503,12 +503,11 @@ async fn receive_video_packets(
 ) {
     // 1 MB max packet size to avoid OOM on malformed streams
     const MAX_PACKET_LEN: usize = 1024 * 1024;
-    let codec = LengthDelimitedCodec::builder()
-        .max_frame_length(MAX_PACKET_LEN)
-        .new_codec();
     let mut packet_reader = FramedRead::with_capacity(
         TcpStreamAsyncReader::new(connection),
-        TimedDecoder::new(codec),
+        LengthDelimitedCodec::builder()
+            .max_frame_length(MAX_PACKET_LEN)
+            .new_codec(),
         MAX_PACKET_LEN,
     );
 
@@ -516,7 +515,13 @@ async fn receive_video_packets(
         // Read MPEG packet from TCP connection
         match packet_reader.next().await {
             Some(Ok(packet)) => {
-                match packet_writer.try_send(packet) {
+                // Calculate the time taken to receive the packet
+                let mut recv_duration = Duration::ZERO;
+                if let Some(start_time) = packet_reader.get_mut().take_first_byte_time() {
+                    recv_duration = start_time.elapsed();
+                }
+
+                match packet_writer.try_send((packet, recv_duration)) {
                     Ok(()) => {
                         // Successfully sent packet
                     }
