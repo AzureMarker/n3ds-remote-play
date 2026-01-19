@@ -1,8 +1,17 @@
 use anyhow::anyhow;
 use ffmpeg::software::scaling as sws;
 use ffmpeg_next as ffmpeg;
+use pin_project_lite::pin_project;
 use rtp_types::RtpPacket;
 use std::cmp::min;
+use std::io::Read;
+use std::net::TcpStream;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
+use tokio::io::{AsyncRead, ReadBuf};
+use tokio_util::bytes::BytesMut;
+use tokio_util::codec::Decoder;
 
 pub trait FrameReassembler {
     fn process_packet(&mut self, packet_buf: &[u8]) -> anyhow::Result<Option<Vec<u8>>>;
@@ -185,49 +194,99 @@ impl FrameReassembler for TcpFrameReassembler {
     }
 }
 
-/// Reassembles MPEG packets from a TCP byte stream.
-/// MPEG packets are framed with a 4-byte big-endian length prefix.
-pub struct MpegPacketReassembler {
-    tcp_buf: Vec<u8>,
+pin_project! {
+    /// Wrapper to adapt a blocking TcpStream into an AsyncRead for Tokio.
+    /// This is a simple implementation that calls `TcpStream::read` every 1ms (in non-blocking mode).
+    /// This is done due to the lack of mio support for the 3DS at the moment.
+    pub struct TcpStreamAsyncReader {
+        inner: TcpStream,
+        interval: tokio::time::Interval,
+    }
 }
 
-impl MpegPacketReassembler {
-    // 1 MB max packet size to avoid OOM on malformed streams
-    const MAX_PACKET_LEN: usize = 1024 * 1024;
-
-    pub fn new() -> Self {
+impl TcpStreamAsyncReader {
+    pub fn new(stream: TcpStream) -> Self {
+        stream.set_nonblocking(true).unwrap();
         Self {
-            tcp_buf: Vec::with_capacity(Self::MAX_PACKET_LEN),
+            inner: stream,
+            interval: tokio::time::interval(Duration::from_millis(1)),
         }
     }
+}
 
-    /// Feed the next chunk read from the TCP stream.
-    /// Returns a complete MPEG packet payload when available.
-    /// Framing: (u32 length BE)(payload). Invalid length is a hard error (non-recoverable desync).
-    pub fn push_chunk(&mut self, chunk: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
-        self.tcp_buf.extend_from_slice(chunk);
+impl AsyncRead for TcpStreamAsyncReader {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.project();
 
-        let Some((length_bytes, packet_bytes)) = self.tcp_buf.split_first_chunk::<4>() else {
-            // Not enough data for length prefix yet
-            return Ok(None);
-        };
-
-        let len = u32::from_be_bytes(*length_bytes) as usize;
-        if len == 0 || len > Self::MAX_PACKET_LEN {
-            return Err(anyhow!("Bad MPEG packet length {len}; TCP stream desynced"));
+        // Wait for the interval to elapse
+        if this.interval.poll_tick(cx).is_pending() {
+            return Poll::Pending;
         }
 
-        if packet_bytes.len() < len {
-            // Not enough data for full packet yet
-            return Ok(None);
+        let unfilled_buf = buf.initialize_unfilled();
+        match this.inner.read(unfilled_buf) {
+            Ok(n) => {
+                buf.advance(n);
+                Poll::Ready(Ok(()))
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                // Reset the interval to wait again
+                this.interval.reset();
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+}
+
+/// A Decoder wrapper that measures the time taken to decode each frame.
+/// The time is measured from the first byte of a new frame being received
+/// until the frame is fully decoded.
+pub struct TimedDecoder<D> {
+    inner: D,
+    frame_start: Option<Instant>,
+}
+
+impl<D> TimedDecoder<D> {
+    pub fn new(inner: D) -> Self {
+        Self {
+            inner,
+            frame_start: None,
+        }
+    }
+}
+
+impl<D: Decoder> Decoder for TimedDecoder<D> {
+    type Item = (D::Item, Duration); // Return the item AND the time it took
+    type Error = D::Error;
+
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        // If we have data but no start time, this is the FIRST chunk of a new frame
+        if !src.is_empty() && self.frame_start.is_none() {
+            self.frame_start = Some(Instant::now());
         }
 
-        let packet = packet_bytes.to_vec();
-        // The drain should not do any memory copies in the common case because there should not be
-        // any extra data after the completed packet yet.
-        self.tcp_buf.drain(0..4 + len);
+        // Attempt to decode the frame using the inner codec
+        match self.inner.decode(src)? {
+            Some(frame) => {
+                // Frame is complete! Calculate elapsed time
+                let elapsed = self
+                    .frame_start
+                    .take()
+                    .map(|start| start.elapsed())
+                    .unwrap_or(Duration::ZERO);
 
-        Ok(Some(packet))
+                Ok(Some((frame, elapsed)))
+            }
+            None => {
+                // Not enough data yet; return None so FramedRead reads more
+                Ok(None)
+            }
+        }
     }
 }
 

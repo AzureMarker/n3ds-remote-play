@@ -2,7 +2,7 @@ mod thread;
 mod video_stream;
 
 use crate::thread::spawn_system_core_thread;
-use crate::video_stream::BgrFrameView;
+use crate::video_stream::{BgrFrameView, TcpStreamAsyncReader, TimedDecoder};
 use bincode::Options;
 use ctru::applets::swkbd;
 use ctru::applets::swkbd::SoftwareKeyboard;
@@ -14,12 +14,15 @@ use ctru::services::ir_user::{CirclePadProInputResponse, ConnectionStatus, IrDev
 use ctru::services::soc::Soc;
 use ctru::services::svc::HandleExt;
 use n3ds_remote_play_common::{CStick, CirclePad, InputState};
-use std::io::{Read, Write};
+use std::io::Write;
 use std::net::{Ipv4Addr, TcpStream, UdpSocket};
 use std::panic;
 use std::str::FromStr;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc::error::TrySendError;
+use tokio_stream::StreamExt;
+use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
 
 const PACKET_INFO_SIZE: usize = 8;
 const MAX_PACKET_SIZE: usize = 32;
@@ -96,53 +99,27 @@ struct RemotePlayClient<'gfx> {
     gfx: &'gfx Gfx,
     ir_user: IrUser,
     hid: Hid,
-    // connection: TcpStream,
-    // udp_connection: UdpSocket,
+    mpeg_decoder: video_stream::Mpeg1Decoder,
     last_cpp_input: CirclePadProInputResponse,
 }
 
 impl<'gfx> RemotePlayClient<'gfx> {
     fn new(apt: Apt, gfx: &'gfx Gfx, ir_user: IrUser, hid: Hid) -> Self {
-        // // Set up control connection
-        // let connection =
-        //     TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
-        // connection.set_nonblocking(true).unwrap();
-        // let local_address = connection.local_addr().unwrap();
-
-        // Set up packet listener
-        // let udp_connection =
-        //     UdpSocket::bind(local_address).expect("Failed to listen for UDP connections");
-        // udp_connection.set_nonblocking(true).unwrap();
-        // udp_connection
-        //     .connect((server_ip, 3535))
-        //     .expect("Failed to set up UDP connection to server");
-
         Self {
             apt,
             gfx,
             ir_user,
             hid,
-            // connection,
-            // udp_connection,
-            // frame_reassembler: Box::new(video_stream::RtpFrameReassembler::new()),
+            mpeg_decoder: video_stream::Mpeg1Decoder::new()
+                .expect("Failed to create MPEG1 decoder"),
             last_cpp_input: CirclePadProInputResponse::default(),
         }
-    }
-
-    fn send_input_state(connection: &mut UdpSocket, state: InputState) -> anyhow::Result<()> {
-        log::trace!("Sending {state:?}");
-
-        let bincode_options = bincode::DefaultOptions::new();
-        let data = bincode_options.serialize(&state)?;
-        connection.send(&data)?;
-        Ok(())
     }
 
     fn run(&mut self, server_ip: Ipv4Addr) {
         // Set up connections
         let connection =
             TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
-        connection.set_nonblocking(true).unwrap();
         let udp_connection = UdpSocket::bind(connection.local_addr().unwrap())
             .expect("Failed to listen for UDP connections");
         udp_connection
@@ -150,10 +127,6 @@ impl<'gfx> RemotePlayClient<'gfx> {
             .expect("Failed to set up UDP connection to server");
         udp_connection.set_nonblocking(true).unwrap();
         log::info!("Connected to remote play server at {server_ip}.");
-
-        // Main thread owns the MPEG decoder; system thread only reassembles length-prefixed packets.
-        let mut mpeg_decoder =
-            video_stream::Mpeg1Decoder::new().expect("Failed to create MPEG1 decoder");
 
         self.gfx.top_screen.borrow_mut().set_double_buffering(false);
         self.gfx.top_screen.borrow_mut().swap_buffers();
@@ -167,11 +140,11 @@ impl<'gfx> RemotePlayClient<'gfx> {
             .expect("Couldn't get ir:USER recv event");
 
         // Set up system core thread to read network data in parallel
-        let (input_sender, input_receiver) = std::sync::mpsc::channel();
+        let (input_sender, input_receiver) = tokio::sync::mpsc::channel(1);
         let (packet_sender, packet_receiver) = std::sync::mpsc::sync_channel(2);
         let result = unsafe {
             spawn_system_core_thread(&mut self.apt, move || {
-                Self::run_system_thread(connection, udp_connection, input_receiver, packet_sender)
+                run_system_thread(connection, udp_connection, input_receiver, packet_sender)
             })
         };
         let Ok(system_thread) = result else {
@@ -182,7 +155,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
             return;
         };
 
-        // let mut udp_recv_buffer = vec![0u8; 70_000];
+        let mut dropped_inputs = 0;
 
         while self.apt.main_loop() {
             self.hid.scan_input();
@@ -223,104 +196,30 @@ impl<'gfx> RemotePlayClient<'gfx> {
             };
 
             // Send input state to system thread
-            if let Err(e) = input_sender.send(input_state) {
-                log::error!("Input sender channel closed: {e}");
-                break;
+            match input_sender.try_send(input_state) {
+                Ok(_) => {
+                    dropped_inputs = 0;
+                }
+                Err(TrySendError::Full(_)) => {
+                    // This is ok, we can drop some inputs if the system thread is busy
+                    dropped_inputs += 1;
+                    if dropped_inputs == 10 {
+                        log::warn!("Dropped 10 input states in a row, there may be a bug");
+                    }
+                }
+                Err(TrySendError::Closed(_)) => {
+                    log::error!("Input sender channel closed");
+                    break;
+                }
             }
 
             // Drain/decode any received MPEG packets on the main thread.
-            self.process_video_stream(&mut mpeg_decoder, &packet_receiver);
+            self.process_video_stream(&packet_receiver);
 
             self.gfx.wait_for_vblank();
         }
 
         unsafe { libc::pthread_detach(system_thread) };
-    }
-
-    fn run_system_thread(
-        mut connection: TcpStream,
-        mut udp_connection: UdpSocket,
-        input_reader: std::sync::mpsc::Receiver<InputState>,
-        packet_writer: std::sync::mpsc::SyncSender<(Vec<u8>, Duration)>,
-    ) {
-        let mut packet_reassembler = video_stream::MpegPacketReassembler::new();
-        let mut tcp_recv_buffer = vec![0u8; 70_000];
-        let mut frame_recv_start: Option<Instant> = None;
-        loop {
-            // Sleep briefly to avoid busy-looping
-            sleep(Duration::from_millis(1));
-
-            // Read input state from channel
-            match input_reader.try_recv() {
-                Ok(state) => {
-                    // Send input state to server
-                    if let Err(e) = Self::send_input_state(&mut udp_connection, state) {
-                        log::error!("Failed to send input state: {e}");
-                        break;
-                    }
-                }
-                Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    // No new input state, continue
-                }
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                    log::info!("Input reader channel disconnected");
-                    break;
-                }
-            };
-
-            // Read frame data from TCP connection
-            let possible_frame_recv_start = Instant::now();
-            let bytes_read = match connection.read(&mut tcp_recv_buffer) {
-                Ok(size) => {
-                    if frame_recv_start.is_none() {
-                        frame_recv_start = Some(possible_frame_recv_start);
-                    }
-                    size
-                }
-                Err(e) => {
-                    if e.kind() != std::io::ErrorKind::WouldBlock {
-                        log::error!(
-                            "Error while checking for UDP packet: {e}, kind = {}",
-                            e.kind()
-                        );
-                    }
-                    continue;
-                }
-            };
-
-            if bytes_read == 0 {
-                log::info!("Server closed the connection");
-                break;
-            }
-
-            let packet_data = &tcp_recv_buffer[..bytes_read];
-            match packet_reassembler.push_chunk(packet_data) {
-                Ok(Some(mpeg_packet)) => {
-                    let frame_recv_duration = frame_recv_start.unwrap().elapsed();
-                    frame_recv_start = None;
-
-                    match packet_writer.try_send((mpeg_packet, frame_recv_duration)) {
-                        Ok(()) => {
-                            // Successfully sent packet
-                        }
-                        Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                            log::warn!("Packet writer channel full, dropping packet");
-                        }
-                        Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                            log::error!("Packet writer channel closed");
-                            break;
-                        }
-                    }
-                }
-                Ok(None) => {
-                    // Need more TCP data.
-                }
-                Err(e) => {
-                    log::error!("Error while reassembling MPEG packet: {e}");
-                    break;
-                }
-            }
-        }
     }
 
     fn scan_cpp_input(&mut self, receive_packet_event: ctru_sys::Handle) {
@@ -352,7 +251,6 @@ impl<'gfx> RemotePlayClient<'gfx> {
 
     fn process_video_stream(
         &mut self,
-        mpeg_decoder: &mut video_stream::Mpeg1Decoder,
         packet_receiver: &std::sync::mpsc::Receiver<(Vec<u8>, Duration)>,
     ) {
         // Drain queued MPEG packets, decode them, and display the most recent decoded frame.
@@ -365,7 +263,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
             packet_size = packet.len();
             frame_recv_duration = recv_duration;
 
-            match mpeg_decoder.decode_mpeg_packet(&packet) {
+            match self.mpeg_decoder.decode_mpeg_packet(&packet) {
                 Ok(Some(frame_view)) => {
                     frame = frame_view;
                 }
@@ -405,7 +303,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
         let frame_write_duration = frame_flush_start.duration_since(frame_write_start);
         log::debug!("Write: {frame_write_duration:?}, Flush: {frame_flush_duration:?}");
         log::info!(
-            "MPEG: {:5} Rx: {:3?}ms De: {:3?}ms",
+            "MPEG: {:5} Rx: {:3?}ms De: {:2?}ms",
             packet_size,
             frame_recv_duration.as_millis(),
             frame_decode_start.elapsed().as_millis()
@@ -531,6 +429,113 @@ impl<'gfx> RemotePlayClient<'gfx> {
             }
 
             self.gfx.wait_for_vblank();
+        }
+    }
+}
+
+/// The system core thread runs its own Tokio runtime to handle async tasks.
+/// It handles sending input states over UDP and reading packets from TCP.
+fn run_system_thread(
+    connection: TcpStream,
+    udp_connection: UdpSocket,
+    input_reader: tokio::sync::mpsc::Receiver<InputState>,
+    packet_writer: std::sync::mpsc::SyncSender<(Vec<u8>, Duration)>,
+) {
+    let async_runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .expect("Failed to create Tokio runtime");
+
+    async_runtime.block_on(async move {
+        // Spawn tasks and wait for them to complete
+        let mut join_set = tokio::task::JoinSet::new();
+
+        join_set.spawn(send_inputs(udp_connection, input_reader));
+        join_set.spawn(receive_video_packets(connection, packet_writer));
+
+        while let Some(join_result) = join_set.join_next().await {
+            if let Err(e) = join_result {
+                log::error!("A task failed: {e}");
+            }
+        }
+    });
+
+    log::info!("System thread tasks completed");
+}
+
+/// Task to send input states over UDP
+async fn send_inputs(
+    mut udp_connection: UdpSocket,
+    mut input_reader: tokio::sync::mpsc::Receiver<InputState>,
+) {
+    loop {
+        // Read input state from channel
+        match input_reader.recv().await {
+            Some(state) => {
+                // Send input state to server
+                if let Err(e) = send_input_state(&mut udp_connection, state) {
+                    log::error!("Failed to send input state: {e}");
+                    break;
+                }
+            }
+            None => {
+                log::info!("Input reader channel disconnected");
+                break;
+            }
+        }
+    }
+}
+
+fn send_input_state(connection: &mut UdpSocket, state: InputState) -> anyhow::Result<()> {
+    log::trace!("Sending {state:?}");
+
+    let bincode_options = bincode::DefaultOptions::new();
+    let data = bincode_options.serialize(&state)?;
+    connection.send(&data)?;
+    Ok(())
+}
+
+/// Task to receive video packets over TCP
+async fn receive_video_packets(
+    connection: TcpStream,
+    packet_writer: std::sync::mpsc::SyncSender<(Vec<u8>, Duration)>,
+) {
+    // 1 MB max packet size to avoid OOM on malformed streams
+    const MAX_PACKET_LEN: usize = 1024 * 1024;
+    let codec = LengthDelimitedCodec::builder()
+        .max_frame_length(MAX_PACKET_LEN)
+        .new_codec();
+    let mut packet_reader = FramedRead::with_capacity(
+        TcpStreamAsyncReader::new(connection),
+        TimedDecoder::new(codec),
+        MAX_PACKET_LEN,
+    );
+
+    loop {
+        // Read MPEG packet from TCP connection
+        match packet_reader.next().await {
+            Some(Ok((mpeg_packet, frame_recv_duration))) => {
+                match packet_writer.try_send((mpeg_packet.to_vec(), frame_recv_duration)) {
+                    Ok(()) => {
+                        // Successfully sent packet
+                    }
+                    Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                        log::warn!("Packet writer channel full, dropping packet");
+                    }
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                        log::info!("Packet writer channel closed");
+                        break;
+                    }
+                }
+            }
+            Some(Err(e)) => {
+                log::error!("Error while reading MPEG packet: {e}");
+                break;
+            }
+            None => {
+                log::info!("Server closed the connection");
+                break;
+            }
         }
     }
 }
