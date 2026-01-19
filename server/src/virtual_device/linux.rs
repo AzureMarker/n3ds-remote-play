@@ -10,6 +10,7 @@ use tokio::fs::{File, OpenOptions};
 const PRO_CONTROLLER_AXES_LIMIT: i32 = 32767;
 const N3DS_CPAD_AXES_LIMIT: i32 = 156;
 
+#[derive(Clone)]
 pub struct UInputDeviceFactory;
 
 #[async_trait]

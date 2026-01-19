@@ -1,8 +1,3 @@
-// We don't directly use tracing, but some dependencies do.
-// We depend on it directly in order to enable the `log-always` feature,
-// which ensures that events are sent to the `log` crate as well.
-extern crate tracing;
-
 mod virtual_device;
 
 use crate::virtual_device::{VirtualDevice, VirtualDeviceFactory};
@@ -35,7 +30,6 @@ fn main() {
         .with_max_level(LevelFilter::DEBUG)
         .init();
 
-    // Initialize ffmpeg
     ffmpeg::init().expect("Failed to initialize ffmpeg");
 
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -56,9 +50,8 @@ async fn async_main() {
     let udp_socket = UdpSocket::bind(("0.0.0.0", 3535))
         .await
         .expect("Failed to bind UDP socket");
-    let device_factory = Arc::new(
-        virtual_device::new_device_factory().expect("Failed to create virtual device factory"),
-    );
+    let device_factory =
+        virtual_device::new_device_factory().expect("Failed to create virtual device factory");
 
     let input_map = Arc::new(RwLock::new(HashMap::new()));
     let (exit_sender, exit_receiver) = tokio::sync::oneshot::channel::<()>();
@@ -75,7 +68,7 @@ async fn async_main() {
                 spawn_local(handle_connection(
                     connection,
                     Arc::clone(&input_map),
-                    Arc::clone(&device_factory),
+                    device_factory.clone(),
                 ));
             }
             Err(e) => {
@@ -141,7 +134,7 @@ async fn input_mapper(
 async fn handle_connection(
     mut tcp_stream: TcpStream,
     input_map: Arc<RwLock<HashMap<SocketAddr, tokio::sync::mpsc::UnboundedSender<InputState>>>>,
-    device_factory: Arc<impl VirtualDeviceFactory>,
+    device_factory: impl VirtualDeviceFactory,
 ) {
     let peer_addr = match tcp_stream.peer_addr() {
         Ok(peer_addr) => peer_addr,
@@ -180,8 +173,8 @@ async fn handle_connection(
     let mut start_sender = Some(start_sender);
     let (exit_sender, mut exit_receiver) = tokio::sync::oneshot::channel();
     let display_task_handle = spawn_local(async move {
-        let cap_w = display.width().unwrap() as u32;
-        let cap_h = display.height().unwrap() as u32;
+        let cap_w = display.width().unwrap();
+        let cap_h = display.height().unwrap();
 
         // Wait for the 3DS to connect
         if let Err(e) = start_receiver.await {
@@ -448,7 +441,7 @@ async fn handle_connection(
                     let _ = sender.send(());
                 }
 
-                // info!("[{peer_addr}] {input_state:?}");
+                trace!("[{peer_addr}] {input_state:?}");
                 device.emit_input(input_state).unwrap();
             }
             frame = frame_receiver.recv() => {

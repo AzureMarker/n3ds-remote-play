@@ -1,5 +1,5 @@
-use crate::virtual_device::VirtualDeviceFactory;
 use crate::VirtualDevice;
+use crate::virtual_device::VirtualDeviceFactory;
 use async_trait::async_trait;
 use n3ds_remote_play_common::{InputState, KeyPad};
 use std::sync::Arc;
@@ -7,6 +7,7 @@ use vigem_client::{TargetId, XButtons, XGamepad, Xbox360Wired};
 
 const N3DS_CPAD_AXES_LIMIT: i32 = 156;
 
+#[derive(Clone)]
 pub struct ViGEmDeviceFactory {
     client: Arc<vigem_client::Client>,
 }

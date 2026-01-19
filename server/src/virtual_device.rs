@@ -20,7 +20,7 @@ pub fn new_device_factory() -> anyhow::Result<impl VirtualDeviceFactory> {
 /// Some virtual device APIs require setup work before they can create a device,
 /// hence this trait.
 #[async_trait]
-pub trait VirtualDeviceFactory {
+pub trait VirtualDeviceFactory: Clone {
     type Device: VirtualDevice;
 
     async fn new_device(&self) -> anyhow::Result<Self::Device>;
