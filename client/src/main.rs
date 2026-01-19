@@ -22,6 +22,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio_stream::StreamExt;
+use tokio_util::bytes::BytesMut;
 use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
 
 const PACKET_INFO_SIZE: usize = 8;
@@ -251,7 +252,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
 
     fn process_video_stream(
         &mut self,
-        packet_receiver: &std::sync::mpsc::Receiver<(Vec<u8>, Duration)>,
+        packet_receiver: &std::sync::mpsc::Receiver<(BytesMut, Duration)>,
     ) {
         // Drain queued MPEG packets, decode them, and display the most recent decoded frame.
         let frame_decode_start = Instant::now();
@@ -439,7 +440,7 @@ fn run_system_thread(
     connection: TcpStream,
     udp_connection: UdpSocket,
     input_reader: tokio::sync::mpsc::Receiver<InputState>,
-    packet_writer: std::sync::mpsc::SyncSender<(Vec<u8>, Duration)>,
+    packet_writer: std::sync::mpsc::SyncSender<(BytesMut, Duration)>,
 ) {
     let async_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
@@ -498,7 +499,7 @@ fn send_input_state(connection: &mut UdpSocket, state: InputState) -> anyhow::Re
 /// Task to receive video packets over TCP
 async fn receive_video_packets(
     connection: TcpStream,
-    packet_writer: std::sync::mpsc::SyncSender<(Vec<u8>, Duration)>,
+    packet_writer: std::sync::mpsc::SyncSender<(BytesMut, Duration)>,
 ) {
     // 1 MB max packet size to avoid OOM on malformed streams
     const MAX_PACKET_LEN: usize = 1024 * 1024;
@@ -514,8 +515,8 @@ async fn receive_video_packets(
     loop {
         // Read MPEG packet from TCP connection
         match packet_reader.next().await {
-            Some(Ok((mpeg_packet, frame_recv_duration))) => {
-                match packet_writer.try_send((mpeg_packet.to_vec(), frame_recv_duration)) {
+            Some(Ok(packet)) => {
+                match packet_writer.try_send(packet) {
                     Ok(()) => {
                         // Successfully sent packet
                     }
