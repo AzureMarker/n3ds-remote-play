@@ -3,7 +3,6 @@ use ffmpeg::software::scaling as sws;
 use ffmpeg_next as ffmpeg;
 use pin_project_lite::pin_project;
 use rtp_types::RtpPacket;
-use std::cmp::min;
 use std::io::Read;
 use std::net::TcpStream;
 use std::pin::Pin;
@@ -99,97 +98,6 @@ impl FrameReassembler for RtpFrameReassembler {
                 expected_seq: packet.sequence_number().wrapping_add(1),
             };
             Ok(None)
-        }
-    }
-}
-
-pub struct TcpFrameReassembler {
-    data: Vec<u8>,
-    state: TcpFrameReassemblyState,
-}
-
-#[derive(PartialEq, Eq, Debug)]
-enum TcpFrameReassemblyState {
-    NotStarted,
-    InProgress { expected_length: u32 },
-    Complete,
-}
-
-impl TcpFrameReassembler {
-    pub fn new() -> Self {
-        TcpFrameReassembler {
-            data: Vec::new(),
-            state: TcpFrameReassemblyState::NotStarted,
-        }
-    }
-}
-
-impl FrameReassembler for TcpFrameReassembler {
-    fn process_packet(&'_ mut self, packet_buf: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
-        log::debug!("Starting TCP state: {:?}", self.state);
-
-        if self.state == TcpFrameReassemblyState::Complete {
-            // Previous frame is complete, clear for new frame
-            self.data.clear();
-            self.state = TcpFrameReassemblyState::NotStarted;
-        }
-
-        log::debug!("Processing TCP packet: length={}", packet_buf.len(),);
-
-        match &self.state {
-            TcpFrameReassemblyState::NotStarted => {
-                // Start of a new frame
-                let expected_length = u32::from_be_bytes(*packet_buf.first_chunk().unwrap());
-                self.data.extend_from_slice(&packet_buf[4..]);
-                self.state = TcpFrameReassemblyState::InProgress { expected_length };
-                Ok(None)
-            }
-            TcpFrameReassemblyState::InProgress { expected_length } => {
-                let remaining_length = min(
-                    *expected_length as usize - self.data.len(),
-                    packet_buf.len(),
-                );
-
-                if remaining_length != packet_buf.len() {
-                    log::warn!(
-                        "Received more data than expected for TCP frame, trying to compensate."
-                    );
-                    self.data.extend_from_slice(&packet_buf[..remaining_length]);
-                    let full_frame = self.data.clone();
-                    self.state = TcpFrameReassemblyState::Complete;
-
-                    let inner_result = self.process_packet(&packet_buf[remaining_length..])?;
-                    if inner_result.is_some() {
-                        log::debug!(
-                            "Also completed next frame while compensating. Only returning first frame."
-                        );
-                    }
-
-                    return Ok(Some(full_frame));
-                }
-
-                self.data.extend_from_slice(&packet_buf[..remaining_length]);
-
-                if self.data.len() == *expected_length as usize {
-                    // Frame is complete
-                    self.state = TcpFrameReassemblyState::Complete;
-                    Ok(Some(self.data.clone()))
-                } else if self.data.len() > *expected_length as usize {
-                    // This should not happen
-                    log::warn!("Received more data than expected for TCP frame, resetting.");
-                    self.data.clear();
-                    self.state = TcpFrameReassemblyState::NotStarted;
-                    Ok(None)
-                } else {
-                    // Frame is still incomplete
-                    log::debug!("Current frame size: {} bytes", self.data.len());
-                    Ok(None)
-                }
-            }
-            TcpFrameReassemblyState::Complete => {
-                // Should not reach here due to the initial check
-                unreachable!();
-            }
         }
     }
 }
