@@ -1,161 +1,58 @@
 use anyhow::anyhow;
-use ffmpeg::software::scaling as sws;
 use ffmpeg_next as ffmpeg;
-use pin_project_lite::pin_project;
-use rtp_types::RtpPacket;
-use std::io::Read;
-use std::net::TcpStream;
+use ffmpeg_next::software::scaling as sws;
+use std::net::UdpSocket;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::io::{AsyncRead, ReadBuf};
 
-pub trait FrameReassembler {
-    fn process_packet(&mut self, packet_buf: &[u8]) -> anyhow::Result<Option<Vec<u8>>>;
+/// Wrapper to adapt a UDP socket into an AsyncRead for FramedRead.
+///
+/// Each `poll_read` yields exactly one UDP datagram (truncated to the ReadBuf capacity).
+pub struct UdpSocketAsyncReader {
+    inner: Arc<UdpSocket>,
+    interval: tokio::time::Interval,
 }
 
-// A simple representation of a decoded frame
-// pub type Frame<'a> = &'a [u8];
-
-// FrameReassembler handles the reassembly of RTP packets into complete frames.
-pub struct RtpFrameReassembler {
-    data: Vec<u8>,
-    state: RtpFrameReassemblyState,
-}
-
-#[derive(PartialEq, Eq, Debug)]
-enum RtpFrameReassemblyState {
-    NotStarted,
-    InProgress { expected_seq: u16 },
-    WaitingForMarker,
-    Complete,
-}
-
-impl RtpFrameReassembler {
-    pub fn new() -> Self {
-        RtpFrameReassembler {
-            data: Vec::new(),
-            state: RtpFrameReassemblyState::NotStarted,
-        }
-    }
-}
-
-impl FrameReassembler for RtpFrameReassembler {
-    // Process an incoming RTP packet and attempt to reassemble frames.
-    // Returns Some(Frame) if a complete frame is reassembled, None otherwise.
-    fn process_packet(&mut self, packet_buf: &[u8]) -> anyhow::Result<Option<Vec<u8>>> {
-        log::debug!("Starting state: {:?}", self.state);
-
-        if self.state == RtpFrameReassemblyState::Complete {
-            // Previous frame is complete, clear for new frame
-            self.data.clear();
-            self.state = RtpFrameReassemblyState::NotStarted;
-        }
-
-        let packet = RtpPacket::parse(packet_buf)?;
-        log::debug!(
-            "Processing packet: seq={}, marker={}",
-            packet.sequence_number(),
-            packet.marker_bit(),
-        );
-
-        // Handle waiting for marker bit to start a new frame
-        if self.state == RtpFrameReassemblyState::WaitingForMarker {
-            if !packet.marker_bit() {
-                // Still waiting for the next frame start
-                return Ok(None);
-            } else {
-                // Found the start of a new frame
-                self.state = RtpFrameReassemblyState::NotStarted;
-                log::debug!("Starting new frame reassembly");
-            }
-        }
-
-        // Check for sequence number continuity
-        if let RtpFrameReassemblyState::InProgress { expected_seq } = self.state
-            && packet.sequence_number() != expected_seq
-        {
-            log::warn!("Packet loss detected, discarding current frame data.");
-            self.data.clear();
-            // Wait for the next marker bit to know when the next frame starts
-            self.state = RtpFrameReassemblyState::WaitingForMarker;
-            return Ok(None);
-        }
-
-        // Append payload (skipping the 4-byte RFC 2435 header that was added)
-        self.data.extend_from_slice(&packet.payload()[4..]);
-        log::debug!("Current frame size: {} bytes", self.data.len());
-
-        if packet.marker_bit() {
-            // Frame is complete
-            self.state = RtpFrameReassemblyState::Complete;
-            Ok(Some(self.data.clone()))
-        } else {
-            // Frame is incomplete
-            self.state = RtpFrameReassemblyState::InProgress {
-                expected_seq: packet.sequence_number().wrapping_add(1),
-            };
-            Ok(None)
-        }
-    }
-}
-
-pin_project! {
-    /// Wrapper to adapt a blocking TcpStream into an AsyncRead for Tokio.
-    /// This is a simple implementation that calls `TcpStream::read` every 1ms (in non-blocking mode).
-    /// This is done due to the lack of mio support for the 3DS at the moment.
-    pub struct TcpStreamAsyncReader {
-        inner: TcpStream,
-        interval: tokio::time::Interval,
-        first_byte_time: Option<Instant>
-    }
-}
-
-impl TcpStreamAsyncReader {
-    pub fn new(stream: TcpStream) -> Self {
-        stream.set_nonblocking(true).unwrap();
+impl UdpSocketAsyncReader {
+    pub fn new(socket: Arc<UdpSocket>) -> Self {
+        socket.set_nonblocking(true).ok();
         Self {
-            inner: stream,
+            inner: socket,
             interval: tokio::time::interval(Duration::from_millis(1)),
-            first_byte_time: None,
         }
-    }
-
-    /// Take the recorded time of the first byte read, if any.
-    /// This will reset the stored time to None.
-    pub fn take_first_byte_time(&mut self) -> Option<Instant> {
-        self.first_byte_time.take()
     }
 }
 
-impl AsyncRead for TcpStreamAsyncReader {
+impl AsyncRead for UdpSocketAsyncReader {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        let this = self.project();
+        let this = self.get_mut();
 
         // Wait for the interval to elapse
         if this.interval.poll_tick(cx).is_pending() {
             return Poll::Pending;
         }
 
-        let unfilled_buf = buf.initialize_unfilled();
-        let possible_first_byte_time = Instant::now();
-
-        match this.inner.read(unfilled_buf) {
+        let unfilled = buf.initialize_unfilled();
+        match this.inner.recv(unfilled) {
             Ok(n) => {
-                // Record the time of the first byte read
-                if n > 0 && this.first_byte_time.is_none() {
-                    *this.first_byte_time = Some(possible_first_byte_time);
+                if n > unfilled.len() {
+                    log::warn!("UDP truncated: {} > {}", n, unfilled.len());
                 }
-
+                let n = n.min(unfilled.len());
                 buf.advance(n);
+
+                // Request another poll after yielding data
+                this.interval.reset_immediately();
                 Poll::Ready(Ok(()))
             }
             Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                // Reset the interval to wait again
                 this.interval.reset();
                 Poll::Pending
             }

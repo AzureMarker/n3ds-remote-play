@@ -1,9 +1,9 @@
+mod system_thread;
 mod thread;
 mod video_stream;
 
 use crate::thread::spawn_system_core_thread;
-use crate::video_stream::{BgrFrameView, TcpStreamAsyncReader};
-use bincode::Options;
+use crate::video_stream::BgrFrameView;
 use ctru::applets::swkbd;
 use ctru::applets::swkbd::SoftwareKeyboard;
 use ctru::console::Console;
@@ -16,14 +16,13 @@ use ctru::services::svc::HandleExt;
 use n3ds_remote_play_common::{CStick, CirclePad, InputState};
 use std::io::Write;
 use std::net::{Ipv4Addr, TcpStream, UdpSocket};
+use std::os::fd::AsRawFd;
 use std::panic;
 use std::str::FromStr;
 use std::thread::sleep;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::error::TrySendError;
-use tokio_stream::StreamExt;
 use tokio_util::bytes::BytesMut;
-use tokio_util::codec::{FramedRead, LengthDelimitedCodec};
 
 const PACKET_INFO_SIZE: usize = 8;
 const MAX_PACKET_SIZE: usize = 32;
@@ -121,12 +120,13 @@ impl<'gfx> RemotePlayClient<'gfx> {
         // Set up connections
         let connection =
             TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
-        let udp_connection = UdpSocket::bind(connection.local_addr().unwrap())
+        let udp_socket = UdpSocket::bind(connection.local_addr().unwrap())
             .expect("Failed to listen for UDP connections");
-        udp_connection
+        set_udp_recv_buffer_size(&udp_socket, 32 * 1024);
+        udp_socket
             .connect((server_ip, 3535))
             .expect("Failed to set up UDP connection to server");
-        udp_connection.set_nonblocking(true).unwrap();
+        udp_socket.set_nonblocking(true).unwrap();
         log::info!("Connected to remote play server at {server_ip}.");
 
         self.gfx.top_screen.borrow_mut().set_double_buffering(false);
@@ -145,7 +145,12 @@ impl<'gfx> RemotePlayClient<'gfx> {
         let (packet_sender, packet_receiver) = std::sync::mpsc::sync_channel(2);
         let result = unsafe {
             spawn_system_core_thread(&mut self.apt, move || {
-                run_system_thread(connection, udp_connection, input_receiver, packet_sender)
+                system_thread::run_system_thread(
+                    connection,
+                    udp_socket,
+                    input_receiver,
+                    packet_sender,
+                )
             })
         };
         let Ok(system_thread) = result else {
@@ -302,7 +307,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
 
         let frame_flush_duration = frame_flush_start.elapsed();
         let frame_write_duration = frame_flush_start.duration_since(frame_write_start);
-        log::debug!("Write: {frame_write_duration:?}, Flush: {frame_flush_duration:?}");
+        log::debug!("Write: {frame_write_duration:.1?}, Flush: {frame_flush_duration:.1?}");
         log::info!(
             "MPEG: {:5} Rx: {:3?}ms De: {:2?}ms",
             packet_size,
@@ -434,114 +439,18 @@ impl<'gfx> RemotePlayClient<'gfx> {
     }
 }
 
-/// The system core thread runs its own Tokio runtime to handle async tasks.
-/// It handles sending input states over UDP and reading packets from TCP.
-fn run_system_thread(
-    connection: TcpStream,
-    udp_connection: UdpSocket,
-    input_reader: tokio::sync::mpsc::Receiver<InputState>,
-    packet_writer: std::sync::mpsc::SyncSender<(BytesMut, Duration)>,
-) {
-    let async_runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_time()
-        .build()
-        .expect("Failed to create Tokio runtime");
-
-    async_runtime.block_on(async move {
-        // Spawn tasks and wait for them to complete
-        let mut join_set = tokio::task::JoinSet::new();
-
-        join_set.spawn(send_inputs(udp_connection, input_reader));
-        join_set.spawn(receive_video_packets(connection, packet_writer));
-
-        while let Some(join_result) = join_set.join_next().await {
-            if let Err(e) = join_result {
-                log::error!("A task failed: {e}");
-            }
-        }
-    });
-
-    log::info!("System thread tasks completed");
-}
-
-/// Task to send input states over UDP
-async fn send_inputs(
-    mut udp_connection: UdpSocket,
-    mut input_reader: tokio::sync::mpsc::Receiver<InputState>,
-) {
-    loop {
-        // Read input state from channel
-        match input_reader.recv().await {
-            Some(state) => {
-                // Send input state to server
-                if let Err(e) = send_input_state(&mut udp_connection, state) {
-                    log::error!("Failed to send input state: {e}");
-                    break;
-                }
-            }
-            None => {
-                log::info!("Input reader channel disconnected");
-                break;
-            }
-        }
-    }
-}
-
-fn send_input_state(connection: &mut UdpSocket, state: InputState) -> anyhow::Result<()> {
-    log::trace!("Sending {state:?}");
-
-    let bincode_options = bincode::DefaultOptions::new();
-    let data = bincode_options.serialize(&state)?;
-    connection.send(&data)?;
-    Ok(())
-}
-
-/// Task to receive video packets over TCP
-async fn receive_video_packets(
-    connection: TcpStream,
-    packet_writer: std::sync::mpsc::SyncSender<(BytesMut, Duration)>,
-) {
-    // 1 MB max packet size to avoid OOM on malformed streams
-    const MAX_PACKET_LEN: usize = 1024 * 1024;
-    let mut packet_reader = FramedRead::with_capacity(
-        TcpStreamAsyncReader::new(connection),
-        LengthDelimitedCodec::builder()
-            .max_frame_length(MAX_PACKET_LEN)
-            .new_codec(),
-        MAX_PACKET_LEN,
-    );
-
-    loop {
-        // Read MPEG packet from TCP connection
-        match packet_reader.next().await {
-            Some(Ok(packet)) => {
-                // Calculate the time taken to receive the packet
-                let mut recv_duration = Duration::ZERO;
-                if let Some(start_time) = packet_reader.get_mut().take_first_byte_time() {
-                    recv_duration = start_time.elapsed();
-                }
-
-                match packet_writer.try_send((packet, recv_duration)) {
-                    Ok(()) => {
-                        // Successfully sent packet
-                    }
-                    Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                        log::warn!("Packet writer channel full, dropping packet");
-                    }
-                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                        log::info!("Packet writer channel closed");
-                        break;
-                    }
-                }
-            }
-            Some(Err(e)) => {
-                log::error!("Error while reading MPEG packet: {e}");
-                break;
-            }
-            None => {
-                log::info!("Server closed the connection");
-                break;
-            }
+fn set_udp_recv_buffer_size(udp_socket: &UdpSocket, size: usize) {
+    unsafe {
+        let socket_fd = udp_socket.as_raw_fd();
+        if libc::setsockopt(
+            socket_fd,
+            libc::SOL_SOCKET,
+            libc::SO_RCVBUF,
+            &size as *const _ as *const libc::c_void,
+            size_of::<libc::c_int>() as libc::socklen_t,
+        ) != 0
+        {
+            panic!("setsockopt failed");
         }
     }
 }

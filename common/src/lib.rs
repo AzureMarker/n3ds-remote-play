@@ -1,5 +1,7 @@
 //! Common types and functionality for the n3ds-remote-play project
 
+pub mod rtp_mpeg;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Copy, Clone, Debug, Default)]

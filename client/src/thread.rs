@@ -1,5 +1,5 @@
-use std::{cmp, mem, panic};
 use ctru::prelude::Apt;
+use std::{cmp, mem, panic};
 
 pub unsafe fn spawn_system_core_thread(
     apt: &mut Apt,
@@ -52,6 +52,14 @@ pub unsafe fn spawn_system_core_thread(
     // This is the 3DS specific part
     assert_eq!(
         unsafe { libc::pthread_attr_setprocessorid_np(attr.as_mut_ptr(), 1) },
+        0
+    );
+    let sched_param = libc::sched_param {
+        // Set to a higher priority than normal threads (0x30)
+        sched_priority: 0x19,
+    };
+    assert_eq!(
+        unsafe { libc::pthread_attr_setschedparam(attr.as_mut_ptr(), &sched_param) },
         0
     );
 
