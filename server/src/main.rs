@@ -212,14 +212,14 @@ async fn handle_connection(
         const ENCODER_FPS_NUM: i32 = 25;
         // Effective real send rate. Higher FPS reduces baseline 'frame interval' latency.
         // We still configure MPEG-1 to ENCODER_FPS_NUM (a supported rate) and step PTS accordingly.
-        const EFFECTIVE_FPS: i64 = 5;
+        const EFFECTIVE_FPS: i64 = 25;
         encoder.set_frame_rate(Some((ENCODER_FPS_NUM, 1)));
         encoder.set_time_base((1, ENCODER_FPS_NUM));
         encoder.set_bit_rate(1_000_000); // 1000 kbps
         // Lower-latency settings:
         // - Smaller GOP => more frequent I-frames => recover faster from scene changes
         // - No B-frames => no frame reordering delay
-        encoder.set_gop(5);
+        encoder.set_gop(20);
         encoder.set_max_b_frames(0);
 
         let mut encoder = encoder.open().expect("Failed to open encoder");

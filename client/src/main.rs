@@ -72,6 +72,7 @@ fn main() {
     remote_play_client.run(server_ip);
     log::info!("Exiting in 10 seconds...");
     sleep(Duration::from_secs(10));
+    log::info!("Main thread exiting");
 }
 
 fn log_format(f: &mut env_logger::fmt::Formatter, record: &log::Record<'_>) -> std::io::Result<()> {
@@ -122,7 +123,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
             TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
         let udp_socket = UdpSocket::bind(connection.local_addr().unwrap())
             .expect("Failed to listen for UDP connections");
-        set_udp_recv_buffer_size(&udp_socket, 32 * 1024);
+        set_udp_recv_buffer_size(&udp_socket, 64 * 1024);
         udp_socket
             .connect((server_ip, 3535))
             .expect("Failed to set up UDP connection to server");
@@ -226,6 +227,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
         }
 
         unsafe { libc::pthread_detach(system_thread) };
+        log::info!("Main loop stopped");
     }
 
     fn scan_cpp_input(&mut self, receive_packet_event: ctru_sys::Handle) {

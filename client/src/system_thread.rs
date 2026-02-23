@@ -39,7 +39,7 @@ pub fn run_system_thread(
         }
     });
 
-    log::info!("System thread tasks completed");
+    log::info!("System thread exiting");
 }
 
 /// Task to send input states over UDP
