@@ -130,10 +130,6 @@ impl<'gfx> RemotePlayClient<'gfx> {
         udp_socket.set_nonblocking(true).unwrap();
         log::info!("Connected to remote play server at {server_ip}.");
 
-        self.gfx.top_screen.borrow_mut().set_double_buffering(false);
-        self.gfx.top_screen.borrow_mut().swap_buffers();
-        // gfx.top_screen.borrow_mut().set_wide_mode(true);
-
         self.connect_circle_pad_pro();
 
         let receive_packet_event = self
@@ -291,8 +287,9 @@ impl<'gfx> RemotePlayClient<'gfx> {
 
         // Write the frame (row-by-row because FFmpeg may pad stride for alignment).
         let frame_write_start = Instant::now();
+        let mut top_screen = self.gfx.top_screen.borrow_mut();
         unsafe {
-            let fb = self.gfx.top_screen.borrow_mut().raw_framebuffer().ptr;
+            let fb = top_screen.raw_framebuffer().ptr;
 
             let row_bytes = frame.width * 3;
             for y in 0..frame.height {
@@ -303,9 +300,8 @@ impl<'gfx> RemotePlayClient<'gfx> {
             }
         }
         let frame_flush_start = Instant::now();
-        let mut top_screen = self.gfx.top_screen.borrow_mut();
         top_screen.flush_buffers();
-        // top_screen.swap_buffers();
+        top_screen.swap_buffers();
 
         let frame_flush_duration = frame_flush_start.elapsed();
         let frame_write_duration = frame_flush_start.duration_since(frame_write_start);
