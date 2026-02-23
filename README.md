@@ -7,5 +7,7 @@ Features (work in progress):
 - [ ] Stream PC audio to the 3DS.
 
 Demo:
+
 ![](screenshots/screenshot_top.png)
+
 ![](screenshots/screenshot_bottom.png)
