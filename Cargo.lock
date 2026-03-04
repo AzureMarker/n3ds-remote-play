@@ -1368,6 +1368,7 @@ dependencies = [
  "rtp-types",
  "tokio",
  "tokio-stream",
+ "tokio-util",
  "tracing",
  "tracing-subscriber",
  "vigem-client",
@@ -2470,6 +2471,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

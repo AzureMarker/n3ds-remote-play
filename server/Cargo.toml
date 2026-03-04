@@ -13,6 +13,7 @@ futures = "0.3"
 rtp-types = "0.1"
 tokio = { version = "1.18", features = ["full"] }
 tokio-stream = { version = "0.1", features = ["net"] }
+tokio-util = { version = "0.7.18", features = ["rt"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["tracing-log"] }
 libc = "0.2"

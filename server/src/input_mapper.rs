@@ -1,3 +1,4 @@
+use anyhow::Context;
 use bincode::Options;
 use n3ds_remote_play_common::InputState;
 use std::collections::HashMap;
@@ -78,6 +79,7 @@ impl InputMapper {
     }
 
     /// Run the input mapper task. This will run until a shutdown message is received.
+    #[tracing::instrument(name = "input_mapper_task", skip_all)]
     pub async fn run(mut self) {
         loop {
             select! {
@@ -87,7 +89,7 @@ impl InputMapper {
 
                 Some(msg) = self.msg_receiver.recv() => match msg {
                     InputMapperMessage::Register { addr, result_sender } => {
-                        let result = self.register_input(addr).await;
+                        let result = self.register_input(addr);
                         if result_sender.send(result).is_err() {
                             warn!("Register result receiver dropped for [{addr}]");
                         }
@@ -105,7 +107,7 @@ impl InputMapper {
         info!("Input mapper task exited");
     }
 
-    async fn register_input(
+    fn register_input(
         &mut self,
         addr: SocketAddr,
     ) -> anyhow::Result<(tokio::sync::watch::Receiver<InputState>, InputMapperGuard)> {
@@ -180,23 +182,20 @@ impl InputMapperHandle {
             result_sender,
         };
 
-        if let Err(e) = self.msg_sender.send(message).await {
-            anyhow::bail!("Failed to register for input packets: {e}");
-        }
+        self.msg_sender
+            .send(message)
+            .await
+            .context("Failed to register for input packets")?;
 
         match result_receiver.await {
             Ok(Ok(result)) => Ok(result),
-            Ok(Err(e)) => {
-                anyhow::bail!("Failed to create input mapping: {e}");
-            }
-            Err(e) => {
-                anyhow::bail!("Failed to receive input guard: {e}");
-            }
+            Ok(Err(e)) => anyhow::bail!("Failed to create input mapping: {e}"),
+            Err(e) => anyhow::bail!("Failed to receive input guard: {e}"),
         }
     }
 
     /// Send a shutdown message to the input mapper task, causing it to exit.
-    pub async fn shutdown(&self) {
+    pub async fn start_shutdown(&self) {
         self.msg_sender
             .send(InputMapperMessage::Shutdown)
             .await
