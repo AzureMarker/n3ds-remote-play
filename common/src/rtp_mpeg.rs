@@ -43,7 +43,7 @@ impl RtpMpegPacketState {
     }
 }
 
-/// Codec used with FramedRead to turn RTP datagrams into complete MPEG packets.
+/// Decoder used with FramedRead to turn RTP datagrams into complete MPEG packets.
 ///
 /// Input: one "frame" == one UDP datagram containing exactly one RTP packet.
 /// Output: one "frame" == one complete MPEG packet payload (reassembled from fragments).
@@ -56,12 +56,12 @@ impl RtpMpegPacketState {
 ///
 /// `frag_offset` makes out-of-order reassembly unambiguous.
 #[derive(Default)]
-pub struct RtpMpegPacketCodec {
+pub struct RtpMpegPacketDecoder {
     in_flight: BTreeMap<u16, RtpMpegPacketState>,
     latest_seq: u16,
 }
 
-impl RtpMpegPacketCodec {
+impl RtpMpegPacketDecoder {
     pub fn new() -> Self {
         Self::default()
     }
@@ -83,7 +83,7 @@ impl RtpMpegPacketCodec {
     }
 }
 
-impl Decoder for RtpMpegPacketCodec {
+impl Decoder for RtpMpegPacketDecoder {
     type Item = (BytesMut, Duration);
     type Error = anyhow::Error;
 
@@ -305,8 +305,8 @@ mod tests {
     }
 
     #[test]
-    fn rtp_mpeg_codec_single_fragment_packet() {
-        let mut codec = RtpMpegPacketCodec::new();
+    fn single_fragment_packet() {
+        let mut decoder = RtpMpegPacketDecoder::new();
 
         let payload = b"hello-mpeg";
         let mut datagram = build_rtp_datagram(
@@ -319,7 +319,7 @@ mod tests {
             payload,
         );
 
-        let (out, _) = codec
+        let (out, _) = decoder
             .decode(&mut datagram)
             .unwrap()
             .expect("expected output");
@@ -328,8 +328,8 @@ mod tests {
     }
 
     #[test]
-    fn rtp_mpeg_codec_multi_fragment_reassembles_in_order() {
-        let mut codec = RtpMpegPacketCodec::new();
+    fn multi_fragment_reassembles_in_order() {
+        let mut decoder = RtpMpegPacketDecoder::new();
 
         let full = b"abcdefghijklmnopqrstuvwxyz";
         let f0 = &full[..10];
@@ -337,21 +337,21 @@ mod tests {
         let f2 = &full[20..];
 
         let mut d0 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 100, full.len() as u32, 0, 3, 0, f0);
-        assert!(codec.decode(&mut d0).unwrap().is_none());
+        assert!(decoder.decode(&mut d0).unwrap().is_none());
 
         let mut d1 =
             build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 100, full.len() as u32, 1, 3, 10, f1);
-        assert!(codec.decode(&mut d1).unwrap().is_none());
+        assert!(decoder.decode(&mut d1).unwrap().is_none());
 
         let mut d2 =
             build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 100, full.len() as u32, 2, 3, 20, f2);
-        let (out, _) = codec.decode(&mut d2).unwrap().expect("expected output");
+        let (out, _) = decoder.decode(&mut d2).unwrap().expect("expected output");
         assert_eq!(out.as_ref(), full);
     }
 
     #[test]
-    fn rtp_mpeg_codec_out_of_order_fragments_reassemble() {
-        let mut codec = RtpMpegPacketCodec::new();
+    fn out_of_order_fragments_reassemble() {
+        let mut decoder = RtpMpegPacketDecoder::new();
 
         let full = b"abcdefghijklmnopqrstuvwxyz";
         let f0 = &full[..10];
@@ -362,15 +362,15 @@ mod tests {
         let mut d1 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 10, full.len() as u32, 1, 3, 10, f1);
         let mut d2 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 10, full.len() as u32, 2, 3, 20, f2);
 
-        assert!(codec.decode(&mut d0).unwrap().is_none());
-        assert!(codec.decode(&mut d2).unwrap().is_none());
-        let (out, _) = codec.decode(&mut d1).unwrap().expect("expected output");
+        assert!(decoder.decode(&mut d0).unwrap().is_none());
+        assert!(decoder.decode(&mut d2).unwrap().is_none());
+        let (out, _) = decoder.decode(&mut d1).unwrap().expect("expected output");
         assert_eq!(out.as_ref(), full);
     }
 
     #[test]
-    fn rtp_mpeg_codec_out_of_order_fragments_reverse_order_reassemble() {
-        let mut codec = RtpMpegPacketCodec::new();
+    fn out_of_order_fragments_reverse_order_reassemble() {
+        let mut decoder = RtpMpegPacketDecoder::new();
 
         let full = b"abcdefghijklmnopqrstuvwxyz";
         let f0 = &full[..10];
@@ -381,15 +381,15 @@ mod tests {
         let mut d1 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 10, full.len() as u32, 1, 3, 10, f1);
         let mut d2 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 10, full.len() as u32, 2, 3, 20, f2);
 
-        assert!(codec.decode(&mut d2).unwrap().is_none());
-        assert!(codec.decode(&mut d1).unwrap().is_none());
-        let (out, _) = codec.decode(&mut d0).unwrap().expect("expected output");
+        assert!(decoder.decode(&mut d2).unwrap().is_none());
+        assert!(decoder.decode(&mut d1).unwrap().is_none());
+        let (out, _) = decoder.decode(&mut d0).unwrap().expect("expected output");
         assert_eq!(out.as_ref(), full);
     }
 
     #[test]
-    fn rtp_mpeg_codec_evicts_old_packets() {
-        let mut codec = RtpMpegPacketCodec::new();
+    fn evicts_old_packets() {
+        let mut decoder = RtpMpegPacketDecoder::new();
 
         let full = b"0123456789abcdef";
         let f0 = &full[..8];
@@ -397,45 +397,45 @@ mod tests {
 
         // Send first fragment of seq 1
         let mut d0 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 200, full.len() as u32, 0, 2, 0, f0);
-        assert!(codec.decode(&mut d0).unwrap().is_none());
+        assert!(decoder.decode(&mut d0).unwrap().is_none());
 
         // Simulate loss of seq 1 by sending seq 2 packet
         let mut d2 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 201, full.len() as u32, 0, 2, 0, f0);
-        assert!(codec.decode(&mut d2).unwrap().is_none());
+        assert!(decoder.decode(&mut d2).unwrap().is_none());
 
         // Simulate loss of seq 2 by sending seq 3 packet
         let mut d4 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 202, full.len() as u32, 0, 2, 0, f0);
-        assert!(codec.decode(&mut d4).unwrap().is_none());
+        assert!(decoder.decode(&mut d4).unwrap().is_none());
 
         // Now send the second fragment of seq 1, which should be discarded
         let mut d1 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 200, full.len() as u32, 1, 2, 8, f1);
         assert!(
-            codec.decode(&mut d1).unwrap().is_none(),
+            decoder.decode(&mut d1).unwrap().is_none(),
             "expected no output due to eviction"
         );
 
         // Complete seq 2 and 3 packets
         let mut d3 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 201, full.len() as u32, 1, 2, 8, f1);
-        let (out2, _) = codec.decode(&mut d3).unwrap().expect("expected output");
+        let (out2, _) = decoder.decode(&mut d3).unwrap().expect("expected output");
         assert_eq!(out2.as_ref(), full);
 
         let mut d5 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 202, full.len() as u32, 1, 2, 8, f1);
-        let (out3, _) = codec.decode(&mut d5).unwrap().expect("expected output");
+        let (out3, _) = decoder.decode(&mut d5).unwrap().expect("expected output");
         assert_eq!(out3.as_ref(), full);
     }
 
     #[test]
-    fn rtp_mpeg_codec_ignores_unexpected_payload_type() {
-        let mut codec = RtpMpegPacketCodec::new();
+    fn ignores_unexpected_payload_type() {
+        let mut decoder = RtpMpegPacketDecoder::new();
 
         let payload = b"nope";
         let mut datagram = build_rtp_datagram(97, 1, payload.len() as u32, 0, 1, 0, payload);
-        assert!(codec.decode(&mut datagram).unwrap().is_none());
+        assert!(decoder.decode(&mut datagram).unwrap().is_none());
     }
 
     #[test]
-    fn rtp_mpeg_codec_duplicate_fragment_is_ignored() {
-        let mut codec = RtpMpegPacketCodec::new();
+    fn duplicate_fragment_is_ignored() {
+        let mut decoder = RtpMpegPacketDecoder::new();
 
         let full = b"abcdefghijklmnopqrstuvwxyz";
         let f0 = &full[..10];
@@ -446,56 +446,56 @@ mod tests {
         let mut d1 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 1, full.len() as u32, 1, 2, 10, f1);
 
         // First fragment will not result in output
-        assert_eq!(codec.decode(&mut d0).unwrap(), None);
+        assert_eq!(decoder.decode(&mut d0).unwrap(), None);
 
         // Duplicate fragment should be ignored
-        assert_eq!(codec.decode(&mut d0_dup).unwrap(), None);
+        assert_eq!(decoder.decode(&mut d0_dup).unwrap(), None);
 
         // Second fragment should complete the packet
-        let (out, _) = codec.decode(&mut d1).unwrap().expect("expected output");
+        let (out, _) = decoder.decode(&mut d1).unwrap().expect("expected output");
         assert_eq!(out.as_ref(), full);
     }
 
     #[test]
-    fn rtp_mpeg_codec_overlap_drops_packet() {
-        let mut codec = RtpMpegPacketCodec::new();
+    fn overlap_drops_packet() {
+        let mut decoder = RtpMpegPacketDecoder::new();
 
         let full = b"abcdefghijklmnopqrstuvwxyz";
         let f0 = &full[..10];
         let f1 = &full[10..];
 
         let mut d0 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 10, full.len() as u32, 0, 2, 0, f0);
-        assert!(codec.decode(&mut d0).unwrap().is_none());
+        assert!(decoder.decode(&mut d0).unwrap().is_none());
 
         // Overlap: frag_index is 1 but the offset overlaps the first fragment
         let mut overlap =
             build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 10, full.len() as u32, 1, 2, 5, f1);
-        assert!(codec.decode(&mut overlap).unwrap().is_none());
+        assert!(decoder.decode(&mut overlap).unwrap().is_none());
 
         // Sending the last fragment should not produce output since the packet was dropped
         let mut d1 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 10, full.len() as u32, 1, 2, 10, f1);
-        assert!(codec.decode(&mut d1).unwrap().is_none());
+        assert!(decoder.decode(&mut d1).unwrap().is_none());
     }
 
     #[test]
-    fn rtp_mpeg_codec_missing_fragment_never_completes() {
-        let mut codec = RtpMpegPacketCodec::new();
+    fn missing_fragment_never_completes() {
+        let mut decoder = RtpMpegPacketDecoder::new();
 
         let full = b"abcdefghijklmnopqrstuvwxyz";
         let f0 = &full[..10];
         let f2 = &full[20..];
 
         let mut d0 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 10, full.len() as u32, 0, 3, 0, f0);
-        assert!(codec.decode(&mut d0).unwrap().is_none());
+        assert!(decoder.decode(&mut d0).unwrap().is_none());
 
         // Skip frag 1 entirely.
         let mut d2 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 11, full.len() as u32, 2, 3, 20, f2);
-        assert!(codec.decode(&mut d2).unwrap().is_none());
+        assert!(decoder.decode(&mut d2).unwrap().is_none());
     }
 
     #[test]
-    fn rtp_mpeg_codec_out_of_order_across_packet_boundary_is_ok() {
-        let mut codec = RtpMpegPacketCodec::new();
+    fn out_of_order_across_packet_boundary_is_ok() {
+        let mut decoder = RtpMpegPacketDecoder::new();
 
         // Packet A (seq=10): 2 fragments
         let a = b"abcdefghijklmnop";
@@ -508,18 +508,18 @@ mod tests {
         // Receive first fragment of A
         let mut a_frag0 =
             build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 10, a.len() as u32, 0, 2, 0, a0);
-        assert!(codec.decode(&mut a_frag0).unwrap().is_none());
+        assert!(decoder.decode(&mut a_frag0).unwrap().is_none());
 
         // Then receive full packet B
         // FIXME: This should not return the packet until we've either completed or given up on A.
         let mut b0 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 11, b.len() as u32, 0, 1, 0, b);
-        let (out_b, _) = codec.decode(&mut b0).unwrap().expect("expected packet B");
+        let (out_b, _) = decoder.decode(&mut b0).unwrap().expect("expected packet B");
         assert_eq!(&out_b[..], b);
 
         // Then receive the last fragment of A
         let mut a_frag1 =
             build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 10, a.len() as u32, 1, 2, 8, a1);
-        let (out_a, _) = codec
+        let (out_a, _) = decoder
             .decode(&mut a_frag1)
             .unwrap()
             .expect("expected packet A");

@@ -87,7 +87,7 @@ async fn receive_video_packets(
     const BUFFER_SIZE: usize = 1024 * 1024;
     let mut packet_reader = FramedRead::with_capacity(
         crate::video_stream::UdpSocketAsyncReader::new(udp_socket),
-        n3ds_remote_play_common::rtp_mpeg::RtpMpegPacketCodec::new(),
+        n3ds_remote_play_common::rtp_mpeg::RtpMpegPacketDecoder::new(),
         BUFFER_SIZE,
     );
 
