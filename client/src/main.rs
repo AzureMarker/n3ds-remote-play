@@ -1,8 +1,9 @@
 mod client;
 mod input_handler;
+mod mpeg_decoder;
 mod system_thread;
 mod thread_spawning;
-mod video_stream;
+mod udp_async_reader;
 
 use client::RemotePlayClient;
 use ctru::applets::swkbd;
@@ -57,9 +58,9 @@ fn main() {
         return;
     };
 
-    let mut remote_play_client = RemotePlayClient::new(apt, &gfx);
+    // Run the main client logic, which will block until the user exits the app or an error occurs
+    RemotePlayClient::new(apt, &gfx).run(server_ip, hid, ir_user);
 
-    remote_play_client.run(server_ip, hid, ir_user);
     log::info!("Exiting in 10 seconds...");
     sleep(Duration::from_secs(10));
     log::info!("Main thread exiting");

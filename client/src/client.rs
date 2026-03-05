@@ -1,7 +1,7 @@
 use crate::input_handler::InputHandler;
+use crate::mpeg_decoder::BgrFrameView;
 use crate::thread_spawning::spawn_system_core_thread;
-use crate::video_stream::BgrFrameView;
-use crate::{system_thread, video_stream};
+use crate::{mpeg_decoder, system_thread};
 use ctru::prelude::{Apt, Gfx, Hid};
 use ctru::services::gfx::{Flush, Screen, Swap};
 use ctru::services::ir_user::IrUser;
@@ -15,7 +15,7 @@ use tokio_util::sync::CancellationToken;
 pub struct RemotePlayClient<'gfx> {
     apt: Apt,
     gfx: &'gfx Gfx,
-    mpeg_decoder: video_stream::Mpeg1Decoder,
+    mpeg_decoder: mpeg_decoder::Mpeg1Decoder,
 }
 
 impl<'gfx> RemotePlayClient<'gfx> {
@@ -23,23 +23,15 @@ impl<'gfx> RemotePlayClient<'gfx> {
         Self {
             apt,
             gfx,
-            mpeg_decoder: video_stream::Mpeg1Decoder::new()
+            mpeg_decoder: mpeg_decoder::Mpeg1Decoder::new()
                 .expect("Failed to create MPEG1 decoder"),
         }
     }
 
-    pub fn run(&mut self, server_ip: Ipv4Addr, hid: Hid, ir_user: IrUser) {
+    pub fn run(mut self, server_ip: Ipv4Addr, hid: Hid, ir_user: IrUser) {
         // Set up connections
-        let tcp_connection =
-            TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
-        let udp_socket = UdpSocket::bind(tcp_connection.local_addr().unwrap())
-            .expect("Failed to listen for UDP connections");
-        set_udp_recv_buffer_size(&udp_socket, 64 * 1024);
-        udp_socket
-            .connect((server_ip, 3535))
-            .expect("Failed to set up UDP connection to server");
-        udp_socket.set_nonblocking(true).unwrap();
-        log::info!("Connected to remote play server at {server_ip}.");
+        let (_tcp_connection, udp_socket) = Self::setup_networking(server_ip);
+        log::info!("Connected to remote play server at {server_ip}");
 
         // Set up input handler and check for Circle Pad Pro
         let (input_sender, input_receiver) = tokio::sync::watch::channel(InputState::default());
@@ -53,7 +45,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
         let (packet_sender, packet_receiver) = std::sync::mpsc::sync_channel(2);
         let cancel_token = CancellationToken::new();
         let cancel_guard = cancel_token.clone().drop_guard();
-        let spawn_result = unsafe {
+        let system_thread = unsafe {
             spawn_system_core_thread(&mut self.apt, || {
                 system_thread::run_system_thread(
                     udp_socket,
@@ -62,15 +54,10 @@ impl<'gfx> RemotePlayClient<'gfx> {
                     cancel_token,
                 )
             })
-        };
-        let Ok(system_thread) = spawn_result else {
-            log::error!(
-                "Failed to spawn system core thread: {:?}",
-                spawn_result.unwrap_err()
-            );
-            return;
+            .expect("Failed to spawn system core thread")
         };
 
+        // Main loop to send inputs and render video frames
         while self.apt.main_loop() {
             if let Err(e) = input_handler.send_inputs_to_server() {
                 // This could be an error or just the user choosing to exit
@@ -96,11 +83,31 @@ impl<'gfx> RemotePlayClient<'gfx> {
         log::debug!("System thread shut down, exiting client");
     }
 
+    /// Set up TCP and UDP connections to the server.
+    fn setup_networking(server_ip: Ipv4Addr) -> (TcpStream, UdpSocket) {
+        let tcp_connection =
+            TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
+
+        let udp_socket = UdpSocket::bind(tcp_connection.local_addr().unwrap())
+            .expect("Failed to listen for UDP connections");
+
+        // Configure the UDP socket
+        set_udp_recv_buffer_size(&udp_socket, 64 * 1024);
+        udp_socket
+            .connect((server_ip, 3535))
+            .expect("Failed to set up UDP connection to server");
+        udp_socket
+            .set_nonblocking(true)
+            .expect("Failed to set UDP socket to non-blocking mode");
+
+        (tcp_connection, udp_socket)
+    }
+
+    /// Check for an MPEG packet from the system thread, decode it, and display the frame.
     fn process_video_stream(
         &mut self,
         packet_receiver: &std::sync::mpsc::Receiver<(BytesMut, Duration)>,
     ) {
-        // Drain queued MPEG packets, decode them, and display the most recent decoded frame.
         let frame_decode_start = Instant::now();
         let frame: BgrFrameView<'_>;
         let packet_size: usize;

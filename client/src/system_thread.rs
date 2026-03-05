@@ -1,5 +1,7 @@
+use crate::udp_async_reader::UdpSocketAsyncReader;
 use bincode::Options;
 use n3ds_remote_play_common::InputState;
+use n3ds_remote_play_common::rtp_mpeg::RtpMpegPacketDecoder;
 use std::net::UdpSocket;
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,6 +10,7 @@ use tokio_stream::StreamExt;
 use tokio_util::bytes::BytesMut;
 use tokio_util::codec::FramedRead;
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::TaskTracker;
 
 /// The system core thread runs its own Tokio runtime to handle async tasks.
 /// It handles sending input states over UDP and reading packets from TCP.
@@ -24,25 +27,23 @@ pub fn run_system_thread(
 
     async_runtime.block_on(async {
         // Spawn tasks and wait for them to complete
-        let mut join_set = tokio::task::JoinSet::new();
+        let task_tracker = TaskTracker::new();
         let udp_socket = Arc::new(udp_socket);
 
-        join_set.spawn(send_inputs(
+        task_tracker.spawn(send_inputs(
             Arc::clone(&udp_socket),
             input_reader,
             cancel_token.clone(),
         ));
-        join_set.spawn(receive_video_packets(
+        task_tracker.spawn(receive_video_packets(
             udp_socket,
             packet_writer,
             cancel_token,
         ));
 
-        while let Some(join_result) = join_set.join_next().await {
-            if let Err(e) = join_result {
-                log::error!("A task failed: {e}");
-            }
-        }
+        // Now that tasks are spawned, we can wait for them to complete.
+        task_tracker.close();
+        task_tracker.wait().await;
     });
 
     log::debug!("System thread exited");
@@ -62,19 +63,16 @@ async fn send_inputs(
             input_result = input_reader.changed() => input_result,
         };
 
-        match input_result {
-            Ok(()) => {
-                // Send input state to server
-                let state = input_reader.borrow_and_update();
-                if let Err(e) = send_input_state(&udp_socket, *state) {
-                    log::error!("Failed to send input state: {e:#}");
-                    break;
-                }
-            }
-            Err(_) => {
-                log::warn!("Input channel disconnected unexpectedly");
-                break;
-            }
+        if input_result.is_err() {
+            log::warn!("Input channel disconnected unexpectedly");
+            break;
+        }
+
+        // Send input state to server
+        let state = input_reader.borrow_and_update();
+        if let Err(e) = send_input_state(&udp_socket, *state) {
+            log::error!("Failed to send input state: {e:#}");
+            break;
         }
     }
 
@@ -99,8 +97,8 @@ async fn receive_video_packets(
     // 1 MB buffer size to allow for holding multiple RTP packets as they are decoded
     const BUFFER_SIZE: usize = 1024 * 1024;
     let mut packet_reader = FramedRead::with_capacity(
-        crate::video_stream::UdpSocketAsyncReader::new(udp_socket),
-        n3ds_remote_play_common::rtp_mpeg::RtpMpegPacketDecoder::new(),
+        UdpSocketAsyncReader::new(udp_socket),
+        RtpMpegPacketDecoder::new(),
         BUFFER_SIZE,
     );
 
