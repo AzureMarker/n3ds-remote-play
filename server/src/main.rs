@@ -14,7 +14,8 @@ use input_mapper::InputMapper;
 use std::sync::Arc;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio_stream::wrappers::TcpListenerStream;
-use tokio_util::task::LocalPoolHandle;
+use tokio_util::sync::CancellationToken;
+use tokio_util::task::{LocalPoolHandle, TaskTracker};
 use tracing::level_filters::LevelFilter;
 use tracing::{error, info, warn};
 use tracing_subscriber::FmtSubscriber;
@@ -51,26 +52,32 @@ async fn async_main() {
     let device_factory =
         virtual_device::new_device_factory().expect("Failed to create virtual device factory");
 
-    // Set up the input mapper to receive input packets from the client and send them to the correct
-    // connection task.
-    let input_mapper = InputMapper::new(Arc::clone(&udp_socket));
-    let input_mapper_handle = input_mapper.handle();
-    let input_mapper_task = tokio::spawn(input_mapper.run());
+    // Set up task lifecycle management
+    let task_tracker = TaskTracker::new();
+    let cancel_token = CancellationToken::new();
+    let _cancel_guard = cancel_token.clone().drop_guard();
 
     // We need a local pool to run the video streaming tasks, since they are !Send due to FFMPEG.
     // Currently, it's not expected to have more than one client, so one worker is enough.
     let local_pool_handle = LocalPoolHandle::new(1);
 
+    // Set up the input mapper to receive input packets from the client and send them to the correct
+    // connection task.
+    let input_mapper = InputMapper::new(Arc::clone(&udp_socket));
+    let input_mapper_handle = input_mapper.handle();
+    task_tracker.spawn(input_mapper.run(cancel_token.child_token()));
+
     info!("Server started, waiting for connections");
     while let Some(connection) = tcp_stream.next().await {
         match connection {
             Ok(connection) => {
-                tokio::spawn(handle_connection(
+                task_tracker.spawn(handle_connection(
                     connection,
                     Arc::clone(&udp_socket),
                     device_factory.clone(),
                     input_mapper_handle.clone(),
                     local_pool_handle.clone(),
+                    cancel_token.child_token(),
                 ));
             }
             Err(e) => {
@@ -81,7 +88,8 @@ async fn async_main() {
     }
 
     info!("Server shutting down");
-    input_mapper_handle.start_shutdown().await;
-    input_mapper_task.await.ok();
+    task_tracker.close();
+    cancel_token.cancel();
+    task_tracker.wait().await;
     info!("Server shut down");
 }

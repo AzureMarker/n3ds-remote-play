@@ -6,6 +6,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::UdpSocket;
 use tokio::select;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
 /// The input mapper receives input state packets over UDP and sends them to the
@@ -31,18 +32,15 @@ enum InputMapperMessage {
             anyhow::Result<(tokio::sync::watch::Receiver<InputState>, InputMapperGuard)>,
         >,
     },
-    Shutdown,
 }
 
-/// A handle to the input mapper task that allows registering new clients and
-/// shutting down the task.
+/// A handle to the input mapper task that allows registering new clients.
 #[derive(Clone)]
 pub struct InputMapperHandle {
     msg_sender: tokio::sync::mpsc::Sender<InputMapperMessage>,
 }
 
-/// A guard that keeps the client registered in the input mapper as long as it is
-/// alive.
+/// A guard that keeps the client registered in the input mapper as long as it is alive.
 pub struct InputMapperGuard {
     socket_addr: SocketAddr,
     remove_sender: tokio::sync::mpsc::UnboundedSender<SocketAddr>,
@@ -80,10 +78,12 @@ impl InputMapper {
 
     /// Run the input mapper task. This will run until a shutdown message is received.
     #[tracing::instrument(name = "input_mapper_task", skip_all)]
-    pub async fn run(mut self) {
+    pub async fn run(mut self, cancel_token: CancellationToken) {
         loop {
             select! {
                 biased;
+
+                _ = cancel_token.cancelled() => break,
 
                 Some(addr) = self.remove_receiver.recv() => self.remove_input(addr),
 
@@ -93,9 +93,6 @@ impl InputMapper {
                         if result_sender.send(result).is_err() {
                             warn!("Register result receiver dropped for [{addr}]");
                         }
-                    },
-                    InputMapperMessage::Shutdown => {
-                        break;
                     },
                 },
 
@@ -191,13 +188,5 @@ impl InputMapperHandle {
             Ok(Err(e)) => anyhow::bail!("Failed to create input mapping: {e}"),
             Err(e) => anyhow::bail!("Failed to receive input guard: {e}"),
         }
-    }
-
-    /// Send a shutdown message to the input mapper task, causing it to exit.
-    pub async fn start_shutdown(&self) {
-        self.msg_sender
-            .send(InputMapperMessage::Shutdown)
-            .await
-            .ok();
     }
 }

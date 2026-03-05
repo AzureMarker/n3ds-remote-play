@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use tokio::net::UdpSocket;
 use tokio::select;
 use tokio::time::MissedTickBehavior;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, warn};
 
 /// Maximum Transmission Unit size.
@@ -30,10 +31,7 @@ pub struct VideoStreamTask {
 
 impl VideoStreamTask {
     #[tracing::instrument(name = "video_stream_task", skip_all, fields(peer_addr = %self.peer_addr))]
-    pub async fn run(
-        self,
-        mut exit_receiver: tokio::sync::oneshot::Receiver<()>,
-    ) -> anyhow::Result<()> {
+    pub async fn run(self, cancel_token: CancellationToken) -> anyhow::Result<()> {
         // Start the video capture so we know which monitor to stream
         let mut video_capture = VideoCapture::start()?;
         let monitor_width = video_capture
@@ -63,8 +61,8 @@ impl VideoStreamTask {
         loop {
             select! {
                 biased;
-                _ = &mut exit_receiver => {
-                    // Regardless of the result (Ok or Err) we should exit
+                _ = cancel_token.cancelled() => {
+                    debug!("Video stream task cancelled");
                     break;
                 }
                 // If we are waiting for the capture to start up again,
