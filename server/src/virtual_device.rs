@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use n3ds_remote_play_common::InputState;
 
 #[cfg(target_os = "linux")]
@@ -19,11 +18,10 @@ pub fn new_device_factory() -> anyhow::Result<impl VirtualDeviceFactory> {
 ///
 /// Some virtual device APIs require setup work before they can create a device,
 /// hence this trait.
-#[async_trait]
 pub trait VirtualDeviceFactory: Clone {
     type Device: VirtualDevice;
 
-    async fn new_device(&self) -> anyhow::Result<Self::Device>;
+    fn new_device(&self) -> impl Future<Output = anyhow::Result<Self::Device>> + Send;
 }
 
 /// A virtual device acts like a real gamepad device, but is controlled by software.

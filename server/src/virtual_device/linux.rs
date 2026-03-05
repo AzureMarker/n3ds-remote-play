@@ -1,5 +1,4 @@
 use crate::virtual_device::{VirtualDevice, VirtualDeviceFactory};
-use async_trait::async_trait;
 use input_linux::{
     AbsoluteAxis, AbsoluteEvent, AbsoluteInfo, AbsoluteInfoSetup, EventKind, EventTime, InputId,
     Key, KeyEvent, KeyState, SynchronizeEvent, SynchronizeKind, UInputHandle,
@@ -13,7 +12,6 @@ const N3DS_CPAD_AXES_LIMIT: i32 = 156;
 #[derive(Clone)]
 pub struct UInputDeviceFactory;
 
-#[async_trait]
 impl VirtualDeviceFactory for UInputDeviceFactory {
     type Device = UInputDevice;
 

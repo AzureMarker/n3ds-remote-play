@@ -1358,7 +1358,6 @@ name = "n3ds-remote-play-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "bincode",
  "ffmpeg-next",
  "futures",
