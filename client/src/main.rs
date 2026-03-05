@@ -1,6 +1,7 @@
 mod client;
+mod input_handler;
 mod system_thread;
-mod thread;
+mod thread_spawning;
 mod video_stream;
 
 use client::RemotePlayClient;
@@ -56,9 +57,9 @@ fn main() {
         return;
     };
 
-    let mut remote_play_client = RemotePlayClient::new(apt, &gfx, ir_user, hid);
+    let mut remote_play_client = RemotePlayClient::new(apt, &gfx);
 
-    remote_play_client.run(server_ip);
+    remote_play_client.run(server_ip, hid, ir_user);
     log::info!("Exiting in 10 seconds...");
     sleep(Duration::from_secs(10));
     log::info!("Main thread exiting");

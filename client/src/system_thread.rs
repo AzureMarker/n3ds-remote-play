@@ -1,36 +1,42 @@
 use bincode::Options;
 use n3ds_remote_play_common::InputState;
-use std::net::{TcpStream, UdpSocket};
+use std::net::UdpSocket;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::select;
 use tokio_stream::StreamExt;
 use tokio_util::bytes::BytesMut;
 use tokio_util::codec::FramedRead;
+use tokio_util::sync::CancellationToken;
 
 /// The system core thread runs its own Tokio runtime to handle async tasks.
 /// It handles sending input states over UDP and reading packets from TCP.
 pub fn run_system_thread(
-    connection: TcpStream,
     udp_socket: UdpSocket,
-    input_reader: tokio::sync::mpsc::Receiver<InputState>,
+    input_reader: tokio::sync::watch::Receiver<InputState>,
     packet_writer: std::sync::mpsc::SyncSender<(BytesMut, Duration)>,
+    cancel_token: CancellationToken,
 ) {
     let async_runtime = tokio::runtime::Builder::new_current_thread()
         .enable_time()
         .build()
         .expect("Failed to create Tokio runtime");
 
-    async_runtime.block_on(async move {
+    async_runtime.block_on(async {
         // Spawn tasks and wait for them to complete
         let mut join_set = tokio::task::JoinSet::new();
-
-        // Reuse the same UDP socket for both directions:
-        // - send input states to server
-        // - receive RTP/MPEG packets from server
         let udp_socket = Arc::new(udp_socket);
 
-        join_set.spawn(send_inputs(Arc::clone(&udp_socket), input_reader));
-        join_set.spawn(receive_video_packets(connection, udp_socket, packet_writer));
+        join_set.spawn(send_inputs(
+            Arc::clone(&udp_socket),
+            input_reader,
+            cancel_token.clone(),
+        ));
+        join_set.spawn(receive_video_packets(
+            udp_socket,
+            packet_writer,
+            cancel_token,
+        ));
 
         while let Some(join_result) = join_set.join_next().await {
             if let Err(e) = join_result {
@@ -39,30 +45,40 @@ pub fn run_system_thread(
         }
     });
 
-    log::info!("System thread exiting");
+    log::debug!("System thread exited");
 }
 
 /// Task to send input states over UDP
 async fn send_inputs(
     udp_socket: Arc<UdpSocket>,
-    mut input_reader: tokio::sync::mpsc::Receiver<InputState>,
+    mut input_reader: tokio::sync::watch::Receiver<InputState>,
+    cancel_token: CancellationToken,
 ) {
     loop {
-        // Read input state from channel
-        match input_reader.recv().await {
-            Some(state) => {
+        // Use select to wait for either a new input state or cancellation
+        let input_result = select! {
+            biased;
+            _ = cancel_token.cancelled() => break,
+            input_result = input_reader.changed() => input_result,
+        };
+
+        match input_result {
+            Ok(()) => {
                 // Send input state to server
-                if let Err(e) = send_input_state(&udp_socket, state) {
-                    log::error!("Failed to send input state: {e}");
+                let state = input_reader.borrow_and_update();
+                if let Err(e) = send_input_state(&udp_socket, *state) {
+                    log::error!("Failed to send input state: {e:#}");
                     break;
                 }
             }
-            None => {
-                log::info!("Input reader channel disconnected");
+            Err(_) => {
+                log::warn!("Input channel disconnected unexpectedly");
                 break;
             }
         }
     }
+
+    log::debug!("send_inputs task exited");
 }
 
 fn send_input_state(udp_socket: &UdpSocket, state: InputState) -> anyhow::Result<()> {
@@ -76,13 +92,10 @@ fn send_input_state(udp_socket: &UdpSocket, state: InputState) -> anyhow::Result
 
 /// Task to receive video packets (RTP over UDP) using FramedRead + a custom Decoder.
 async fn receive_video_packets(
-    connection: TcpStream,
     udp_socket: Arc<UdpSocket>,
     packet_writer: std::sync::mpsc::SyncSender<(BytesMut, Duration)>,
+    cancel_token: CancellationToken,
 ) {
-    // Keep TCP around for bootstrap/future use.
-    let _connection = connection;
-
     // 1 MB buffer size to allow for holding multiple RTP packets as they are decoded
     const BUFFER_SIZE: usize = 1024 * 1024;
     let mut packet_reader = FramedRead::with_capacity(
@@ -91,22 +104,37 @@ async fn receive_video_packets(
         BUFFER_SIZE,
     );
 
-    while let Some(item) = packet_reader.next().await {
-        match item {
-            Ok((packet, recv_duration)) => match packet_writer.try_send((packet, recv_duration)) {
-                Ok(()) => {}
-                Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                    log::warn!("Packet writer channel full, dropping packet");
-                }
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                    log::info!("Packet writer channel closed");
-                    break;
-                }
-            },
-            Err(e) => {
-                log::error!("Error while reading RTP MPEG packet: {e}");
+    loop {
+        // Fetch packets until cancellation or an error occurs
+        let packet_result = select! {
+            biased;
+            _ = cancel_token.cancelled() => break,
+            packet_result = packet_reader.next() => packet_result,
+        };
+
+        let (packet, recv_duration) = match packet_result {
+            Some(Ok(item)) => item,
+            Some(Err(e)) => {
+                log::error!("Error reading video packet: {e:#}");
+                break;
+            }
+            None => {
+                log::warn!("Video packet stream ended unexpectedly");
+                break;
+            }
+        };
+
+        match packet_writer.try_send((packet, recv_duration)) {
+            Ok(()) => {}
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                log::warn!("Packet writer channel full, dropping packet");
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                log::warn!("Packet writer channel closed unexpectedly");
                 break;
             }
         }
     }
+
+    log::debug!("receive_video_packets task exited");
 }

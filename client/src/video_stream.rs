@@ -1,10 +1,10 @@
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use ffmpeg_next as ffmpeg;
 use ffmpeg_next::software::scaling as sws;
 use std::net::UdpSocket;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::task::{Context, Poll};
+use std::task::Poll;
 use std::time::Duration;
 use tokio::io::{AsyncRead, ReadBuf};
 
@@ -29,7 +29,7 @@ impl UdpSocketAsyncReader {
 impl AsyncRead for UdpSocketAsyncReader {
     fn poll_read(
         self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
+        cx: &mut std::task::Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
         let this = self.get_mut();
@@ -104,7 +104,7 @@ impl Mpeg1Decoder {
             FRAME_H,
             sws::flag::Flags::FAST_BILINEAR,
         )
-        .map_err(|e| anyhow!("Failed to create swscale context: {e}"))?;
+        .context("Failed to create swscale context")?;
 
         let bgr_frame =
             ffmpeg::util::frame::Video::new(ffmpeg::format::Pixel::BGR24, FRAME_W, FRAME_H);
@@ -149,7 +149,7 @@ impl Mpeg1Decoder {
                 // Convert decoded YUV420P to BGR24 using swscale.
                 self.scaler
                     .run(&self.video_frame, &mut self.bgr_frame)
-                    .map_err(|e| anyhow!("swscale conversion failed: {e}"))?;
+                    .context("swscale conversion failed")?;
 
                 let width = self.bgr_frame.width() as usize;
                 let height = self.bgr_frame.height() as usize;

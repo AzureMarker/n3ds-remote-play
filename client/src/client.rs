@@ -1,47 +1,38 @@
-use crate::thread::spawn_system_core_thread;
+use crate::input_handler::InputHandler;
+use crate::thread_spawning::spawn_system_core_thread;
 use crate::video_stream::BgrFrameView;
 use crate::{system_thread, video_stream};
-use ctru::prelude::{Apt, Gfx, Hid, KeyPad};
+use ctru::prelude::{Apt, Gfx, Hid};
 use ctru::services::gfx::{Flush, Screen, Swap};
-use ctru::services::ir_user::{CirclePadProInputResponse, ConnectionStatus, IrDeviceId, IrUser};
-use ctru::services::svc::HandleExt;
-use n3ds_remote_play_common::{CStick, CirclePad, InputState};
+use ctru::services::ir_user::IrUser;
+use n3ds_remote_play_common::InputState;
 use std::net::{Ipv4Addr, TcpStream, UdpSocket};
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc::error::TrySendError;
 use tokio_util::bytes::BytesMut;
-
-const CPP_CONNECTION_POLLING_PERIOD_MS: u8 = 0x08;
-const CPP_POLLING_PERIOD_MS: u8 = 0x32;
+use tokio_util::sync::CancellationToken;
 
 pub struct RemotePlayClient<'gfx> {
     apt: Apt,
     gfx: &'gfx Gfx,
-    ir_user: IrUser,
-    hid: Hid,
     mpeg_decoder: video_stream::Mpeg1Decoder,
-    last_cpp_input: CirclePadProInputResponse,
 }
 
 impl<'gfx> RemotePlayClient<'gfx> {
-    pub fn new(apt: Apt, gfx: &'gfx Gfx, ir_user: IrUser, hid: Hid) -> Self {
+    pub fn new(apt: Apt, gfx: &'gfx Gfx) -> Self {
         Self {
             apt,
             gfx,
-            ir_user,
-            hid,
             mpeg_decoder: video_stream::Mpeg1Decoder::new()
                 .expect("Failed to create MPEG1 decoder"),
-            last_cpp_input: CirclePadProInputResponse::default(),
         }
     }
 
-    pub fn run(&mut self, server_ip: Ipv4Addr) {
+    pub fn run(&mut self, server_ip: Ipv4Addr, hid: Hid, ir_user: IrUser) {
         // Set up connections
-        let connection =
+        let tcp_connection =
             TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
-        let udp_socket = UdpSocket::bind(connection.local_addr().unwrap())
+        let udp_socket = UdpSocket::bind(tcp_connection.local_addr().unwrap())
             .expect("Failed to listen for UDP connections");
         set_udp_recv_buffer_size(&udp_socket, 64 * 1024);
         udp_socket
@@ -50,90 +41,39 @@ impl<'gfx> RemotePlayClient<'gfx> {
         udp_socket.set_nonblocking(true).unwrap();
         log::info!("Connected to remote play server at {server_ip}.");
 
-        self.connect_circle_pad_pro();
+        // Set up input handler and check for Circle Pad Pro
+        let (input_sender, input_receiver) = tokio::sync::watch::channel(InputState::default());
+        let mut input_handler = InputHandler::new(hid, ir_user, input_sender);
 
-        let receive_packet_event = self
-            .ir_user
-            .get_recv_event()
-            .expect("Couldn't get ir:USER recv event");
+        input_handler.connect_circle_pad_pro(&self.apt, self.gfx);
 
-        // Set up system core thread to read network data in parallel
-        let (input_sender, input_receiver) = tokio::sync::mpsc::channel(1);
+        // Set up system core thread to send/receive network data in parallel
         let (packet_sender, packet_receiver) = std::sync::mpsc::sync_channel(2);
-        let result = unsafe {
-            spawn_system_core_thread(&mut self.apt, move || {
+        let cancel_token = CancellationToken::new();
+        let cancel_guard = cancel_token.clone().drop_guard();
+        let spawn_result = unsafe {
+            spawn_system_core_thread(&mut self.apt, || {
                 system_thread::run_system_thread(
-                    connection,
                     udp_socket,
                     input_receiver,
                     packet_sender,
+                    cancel_token,
                 )
             })
         };
-        let Ok(system_thread) = result else {
+        let Ok(system_thread) = spawn_result else {
             log::error!(
                 "Failed to spawn system core thread: {:?}",
-                result.unwrap_err()
+                spawn_result.unwrap_err()
             );
             return;
         };
 
-        let mut dropped_inputs = 0;
-
         while self.apt.main_loop() {
-            self.hid.scan_input();
-
-            let mut keys_down_or_held = self.hid.keys_down().union(self.hid.keys_held());
-            if keys_down_or_held.contains(KeyPad::START)
-                && keys_down_or_held.contains(KeyPad::SELECT)
-            {
+            if let Err(e) = input_handler.send_inputs_to_server() {
+                // This could be an error or just the user choosing to exit
+                log::info!("Exiting main loop: {e}");
                 break;
-            }
-
-            self.scan_cpp_input(receive_packet_event);
-
-            // Add in the buttons from CPP
-            if self.last_cpp_input.r_pressed {
-                keys_down_or_held |= KeyPad::R;
-            }
-            if self.last_cpp_input.zl_pressed {
-                keys_down_or_held |= KeyPad::ZL;
-            }
-            if self.last_cpp_input.zr_pressed {
-                keys_down_or_held |= KeyPad::ZR;
-            }
-
-            let circle_pad_pos = self.hid.circlepad_position();
-            let input_state = InputState {
-                key_pad: n3ds_remote_play_common::KeyPad::from_bits_truncate(
-                    keys_down_or_held.bits(),
-                ),
-                circle_pad: CirclePad {
-                    x: circle_pad_pos.0,
-                    y: circle_pad_pos.1,
-                },
-                c_stick: CStick {
-                    x: self.last_cpp_input.c_stick_x,
-                    y: self.last_cpp_input.c_stick_y,
-                },
-            };
-
-            // Send input state to system thread
-            match input_sender.try_send(input_state) {
-                Ok(_) => {
-                    dropped_inputs = 0;
-                }
-                Err(TrySendError::Full(_)) => {
-                    // This is ok, we can drop some inputs if the system thread is busy
-                    dropped_inputs += 1;
-                    if dropped_inputs == 10 {
-                        log::warn!("Dropped 10 input states in a row, there may be a bug");
-                    }
-                }
-                Err(TrySendError::Closed(_)) => {
-                    log::error!("Input sender channel closed");
-                    break;
-                }
             }
 
             // Drain/decode any received MPEG packets on the main thread.
@@ -142,35 +82,16 @@ impl<'gfx> RemotePlayClient<'gfx> {
             self.gfx.wait_for_vblank();
         }
 
-        unsafe { libc::pthread_detach(system_thread) };
-        log::info!("Main loop stopped");
-    }
-
-    fn scan_cpp_input(&mut self, receive_packet_event: ctru_sys::Handle) {
-        // Check if we've received a packet from the circle pad pro
-        let packet_received = receive_packet_event.wait_for_event(Duration::ZERO).is_ok();
-        if !packet_received {
-            return;
+        log::debug!("Main loop stopped, shutting down system thread");
+        drop(cancel_guard);
+        let join_result = unsafe { libc::pthread_join(system_thread, std::ptr::null_mut()) };
+        if join_result != 0 {
+            log::error!(
+                "Failed to join system thread: {}",
+                std::io::Error::from_raw_os_error(join_result)
+            );
         }
-
-        let packets = self.ir_user.get_packets().expect("Failed to get packets");
-        let packet_count = packets.len();
-        let Some(packet) = packets.last() else {
-            panic!("No packets found")
-        };
-        let cpp_input = CirclePadProInputResponse::try_from(packet)
-            .expect("Failed to parse CPP response from IR packet");
-        self.last_cpp_input = cpp_input;
-
-        // Done handling the packets, release them
-        self.ir_user
-            .release_received_data(packet_count as u32)
-            .expect("Failed to release ir:USER packets");
-
-        // Remind the CPP that we're still listening
-        self.ir_user
-            .request_input_polling(CPP_POLLING_PERIOD_MS)
-            .expect("Failed to request input polling from CPP");
+        log::debug!("System thread shut down, exiting client");
     }
 
     fn process_video_stream(
@@ -196,7 +117,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
                     return;
                 }
                 Err(e) => {
-                    log::error!("MPEG decode error: {e}");
+                    log::error!("MPEG decode error: {e:#}");
                     return;
                 }
             }
@@ -234,129 +155,9 @@ impl<'gfx> RemotePlayClient<'gfx> {
         );
         log::debug!("");
     }
-
-    /// Detect and enable 3DS Circle Pad Pro (or continue without it if user skips)
-    fn connect_circle_pad_pro(&mut self) {
-        // Get event handles
-        let connection_status_event = self
-            .ir_user
-            .get_connection_status_event()
-            .expect("Couldn't get ir:USER connection status event");
-        let receive_packet_event = self
-            .ir_user
-            .get_recv_event()
-            .expect("Couldn't get ir:USER recv event");
-
-        log::info!(
-            "If you have a New 3DS or Circle Pad Pro, press A to connect extra inputs. Otherwise press B."
-        );
-        'cpp_connect_loop: while self.apt.main_loop() {
-            self.hid.scan_input();
-            let keys_down_or_held = self.hid.keys_down().union(self.hid.keys_held());
-
-            if keys_down_or_held.contains(KeyPad::B) {
-                log::info!("Canceling New 3DS / Circle Pad Pro detection");
-                break;
-            }
-
-            if keys_down_or_held.contains(KeyPad::A) {
-                log::info!("Trying to connect. Press Start to cancel.");
-
-                // Connection loop
-                loop {
-                    self.hid.scan_input();
-                    if self.hid.keys_held().contains(KeyPad::START) {
-                        break 'cpp_connect_loop;
-                    }
-
-                    // Start the connection process
-                    self.ir_user
-                        .require_connection(IrDeviceId::CirclePadPro)
-                        .expect("Couldn't initialize circle pad pro connection");
-
-                    // Wait for the connection to establish
-                    if let Err(e) =
-                        connection_status_event.wait_for_event(Duration::from_millis(100))
-                        && !e.is_timeout()
-                    {
-                        panic!("Couldn't initialize circle pad pro connection: {e}");
-                    }
-
-                    if self.ir_user.get_status_info().connection_status
-                        == ConnectionStatus::Connected
-                    {
-                        log::info!("Connected!");
-                        break;
-                    }
-
-                    // If not connected (ex. timeout), disconnect so we can retry
-                    self.ir_user
-                        .disconnect()
-                        .expect("Failed to disconnect circle pad pro connection");
-
-                    // Wait for the disconnect to go through
-                    if let Err(e) =
-                        connection_status_event.wait_for_event(Duration::from_millis(100))
-                        && !e.is_timeout()
-                    {
-                        panic!("Couldn't initialize circle pad pro connection: {e}");
-                    }
-                }
-
-                // Sending first packet retry loop
-                loop {
-                    self.hid.scan_input();
-                    if self.hid.keys_held().contains(KeyPad::START) {
-                        break 'cpp_connect_loop;
-                    }
-
-                    // Send a request for input to the CPP
-                    if let Err(e) = self
-                        .ir_user
-                        .request_input_polling(CPP_CONNECTION_POLLING_PERIOD_MS)
-                    {
-                        log::error!("{e:?}");
-                    }
-
-                    // Wait for the response
-                    let recv_event_result =
-                        receive_packet_event.wait_for_event(Duration::from_millis(100));
-
-                    if recv_event_result.is_ok() {
-                        log::info!("Got first packet from CPP");
-                        let packets = self.ir_user.get_packets().expect("Failed to get packets");
-                        let packet_count = packets.len();
-                        let Some(packet) = packets.last() else {
-                            panic!("No packets found")
-                        };
-                        let cpp_input = CirclePadProInputResponse::try_from(packet)
-                            .expect("Failed to parse CPP response from IR packet");
-                        self.last_cpp_input = cpp_input;
-
-                        // Done handling the packets, release them
-                        self.ir_user
-                            .release_received_data(packet_count as u32)
-                            .expect("Failed to release ir:USER packets");
-
-                        // Remind the CPP that we're still listening
-                        self.ir_user
-                            .request_input_polling(CPP_POLLING_PERIOD_MS)
-                            .expect("Failed to request input polling from CPP");
-                        break;
-                    }
-
-                    // We didn't get a response in time, so loop and retry
-                }
-
-                // Finished connecting
-                break;
-            }
-
-            self.gfx.wait_for_vblank();
-        }
-    }
 }
 
+/// Set the UDP receive buffer size. The default is very small and causes packet loss.
 fn set_udp_recv_buffer_size(udp_socket: &UdpSocket, size: usize) {
     unsafe {
         let socket_fd = udp_socket.as_raw_fd();
