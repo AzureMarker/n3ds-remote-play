@@ -118,7 +118,7 @@ impl VideoStreamTask {
                     .await
                 {
                     Err(e) => {
-                        error!("Error while sending MPEG RTP packet: {e}");
+                        error!("Error while sending MPEG RTP packet: {e:#}");
                         break;
                     }
                     Ok(fragment_count) => {

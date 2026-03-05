@@ -109,7 +109,7 @@ async fn handle_connection(
     )
     .await
     {
-        error!("{e}");
+        error!("{e:#}");
     }
 }
 
@@ -154,6 +154,7 @@ async fn handle_connection_impl(
 
     // Handle input events in the main task.
     // If the client stops sending input events, we will close the connection.
+    let mut joined_video_stream_task = false;
     loop {
         select! {
             changed_result = input_receiver.changed() => {
@@ -168,7 +169,7 @@ async fn handle_connection_impl(
                 // Send the input state to the virtual device
                 trace!("{input_state:?}");
                 if let Err(e) = device.emit_input(input_state) {
-                    error!("Error while emitting input state: {e}");
+                    error!("Error while emitting input state: {e:#}");
                     break;
                 }
             }
@@ -177,12 +178,13 @@ async fn handle_connection_impl(
                 break;
             }
             result = &mut video_stream_handle => {
+                joined_video_stream_task = true;
                 match result {
                     Ok(Ok(())) => {
                         error!("Video stream task ended unexpectedly");
                     }
                     Ok(Err(e)) => {
-                        error!("Video stream task returned an error: {e}");
+                        error!("Video stream task returned an error: {e:#}");
                     }
                     Err(e) => {
                         error!("Video stream task ended unexpectedly: {e}");
@@ -195,10 +197,12 @@ async fn handle_connection_impl(
 
     info!("Closing connection");
     let _ = exit_sender.send(());
-    video_stream_handle
-        .await
-        .context("Failed to wait for video stream task to finish")?
-        .context("Video stream task returned an error")?;
+    if !joined_video_stream_task {
+        video_stream_handle
+            .await
+            .context("Failed to wait for video stream task to finish")?
+            .context("Video stream task returned an error")?;
+    }
     tcp_stream
         .shutdown()
         .await
