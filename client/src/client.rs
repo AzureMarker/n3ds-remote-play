@@ -45,7 +45,9 @@ impl<'gfx> RemotePlayClient<'gfx> {
         let (input_sender, input_receiver) = tokio::sync::watch::channel(InputState::default());
         let mut input_handler = InputHandler::new(hid, ir_user, input_sender);
 
-        input_handler.connect_circle_pad_pro(&self.apt, self.gfx);
+        input_handler
+            .connect_circle_pad_pro(&self.apt, self.gfx)
+            .expect("Failed to connect Circle Pad Pro");
 
         // Set up system core thread to send/receive network data in parallel
         let (packet_sender, packet_receiver) = std::sync::mpsc::sync_channel(2);
@@ -72,7 +74,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
         while self.apt.main_loop() {
             if let Err(e) = input_handler.send_inputs_to_server() {
                 // This could be an error or just the user choosing to exit
-                log::info!("Exiting main loop: {e}");
+                log::info!("Exiting main loop: {e:#}");
                 break;
             }
 
