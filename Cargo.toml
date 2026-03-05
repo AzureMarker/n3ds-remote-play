@@ -7,4 +7,24 @@ debug = 1
 
 [patch.crates-io]
 ffmpeg-sys-next = { git = "https://github.com/AzureMarker/rust-ffmpeg-sys.git" }
-#ffmpeg-sys-next = { path = "../rust-ffmpeg-sys" }
+
+[workspace.dependencies]
+anyhow = "1.0"
+bincode = "1.3"
+ctru-rs = { git = "https://github.com/rust3ds/ctru-rs.git" }
+ctru-sys = { git = "https://github.com/rust3ds/ctru-rs.git" }
+env_logger = { version = "0.11", default-features = false }
+ffmpeg-next = "8.0.0"
+futures = "0.3"
+input-linux = "0.5.0"
+libc = "0.2"
+log = "0.4"
+n3ds-remote-play-common = { path = "common" }
+rtp-types = "0.1"
+tokio = "1.49.0"
+tokio-stream = { version = "0.1", default-features = false }
+tokio-util = "0.7"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["tracing-log"] }
+vigem-client = "0.1.4"
+xcap = "0.8"
