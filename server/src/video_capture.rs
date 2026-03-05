@@ -1,6 +1,6 @@
 use anyhow::Context;
 use tokio::task::spawn_blocking;
-use tracing::error;
+use tracing::{debug, error};
 
 /// This struct is responsible for capturing raw frames from the monitor.
 /// It spawns a separate thread to perform the capture. Read the frames using `frame_receiver`.
@@ -35,6 +35,7 @@ impl VideoCapture {
                     break;
                 }
             }
+            debug!("Video capture thread exiting since video stream ended");
         });
 
         Ok(Self {

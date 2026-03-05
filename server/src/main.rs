@@ -144,7 +144,7 @@ async fn handle_connection_impl(
     let video_stream_task = video_stream::VideoStreamTask {
         peer_addr,
         udp_socket,
-        effective_fps: 25,
+        effective_fps: 20,
         encoder_fps: 25,
     };
     let (exit_sender, exit_receiver) = tokio::sync::oneshot::channel();

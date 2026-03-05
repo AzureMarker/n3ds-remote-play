@@ -165,9 +165,6 @@ impl Mpeg1Encoder {
             .frame(&mut self.filtered_frame)
             .context("Failed to pull frame from filter graph")?;
 
-        // Keep PTS consistent through the graph and encoder.
-        self.filtered_frame.set_pts(Some(pts as i64));
-
         // Encode the frame
         let mut mpeg_packets = Vec::new();
 
@@ -194,6 +191,7 @@ impl Mpeg1Encoder {
         Ok(mpeg_packets)
     }
 
+    /// Copy pixel data from the captured RGBA frame into the FFMPEG frame buffer.
     fn copy_packed_into_frame(
         &self,
         dst: &mut ffmpeg::util::frame::Video,

@@ -136,6 +136,7 @@ impl VideoStreamTask {
             .video_recorder
             .stop()
             .context("Failed to stop video recorder")?;
+        info!("Video stream task exited");
         Ok(())
     }
 

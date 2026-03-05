@@ -95,7 +95,6 @@ impl InputMapper {
                         }
                     },
                     InputMapperMessage::Shutdown => {
-                        debug!("Input mapper task exiting");
                         break;
                     },
                 },
