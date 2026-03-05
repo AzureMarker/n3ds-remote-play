@@ -4,7 +4,7 @@ use crate::virtual_device::{VirtualDevice, VirtualDeviceFactory};
 use anyhow::Context;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::select;
 use tokio_util::sync::CancellationToken;
@@ -84,6 +84,7 @@ async fn handle_connection_impl(
     // Handle input events in the main task.
     // If the client stops sending input events, we will close the connection.
     let mut joined_video_stream_task = false;
+    let mut read_buffer = [0];
     loop {
         select! {
             biased;
@@ -93,22 +94,30 @@ async fn handle_connection_impl(
                 break;
             }
 
+            // Close the connection if the video stream ends
             result = &mut video_stream_handle => {
                 joined_video_stream_task = true;
                 match result {
-                    Ok(Ok(())) => {
-                        error!("Video stream task ended unexpectedly");
-                    }
-                    Ok(Err(e)) => {
-                        error!("Video stream task returned an error: {e:#}");
-                    }
-                    Err(e) => {
-                        error!("Video stream task ended unexpectedly: {e}");
-                    }
+                    Ok(Ok(())) => error!("Video stream task ended unexpectedly"),
+                    Ok(Err(e)) => error!("Video stream task returned an error: {e:#}"),
+                    Err(e) => error!("Video stream task ended unexpectedly: {e}"),
                 }
                 break;
             }
 
+            // Close the connection if the client disconnects
+            read_result = tcp_stream.read(&mut read_buffer) => {
+                match read_result {
+                    Ok(0) => info!("Client closed the connection"),
+                    Ok(_) => error!("Received data from client over TCP, which is unexpected"),
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                        info!("Client closed the connection"),
+                    Err(e) => error!("Failed to read from TCP stream: {e}"),
+                }
+                break;
+            }
+
+            // Send input events to the virtual device
             changed_result = input_receiver.changed() => {
                 if changed_result.is_err() {
                     info!("Input receiver channel closed");
@@ -126,6 +135,7 @@ async fn handle_connection_impl(
                 }
             }
 
+            // Close the connection if we don't receive any input events for a while
             _ = tokio::time::sleep(CLIENT_CONNECTION_TIMEOUT) => {
                 error!("Timed out while waiting for client to send an input packet ({CLIENT_CONNECTION_TIMEOUT:?})");
                 break;
