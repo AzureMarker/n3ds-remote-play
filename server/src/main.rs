@@ -14,6 +14,7 @@ use input_mapper::InputMapper;
 use std::sync::Arc;
 use tokio::net::{TcpListener, UdpSocket};
 use tokio_stream::wrappers::TcpListenerStream;
+use tokio_util::future::FutureExt;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::{LocalPoolHandle, TaskTracker};
 use tracing::level_filters::LevelFilter;
@@ -52,10 +53,11 @@ async fn async_main() {
     let device_factory =
         virtual_device::new_device_factory().expect("Failed to create virtual device factory");
 
-    // Set up task lifecycle management
+    // Set up task lifecycle management and signal handling
     let task_tracker = TaskTracker::new();
     let cancel_token = CancellationToken::new();
     let _cancel_guard = cancel_token.clone().drop_guard();
+    task_tracker.spawn(handle_signals(cancel_token.clone()));
 
     // We need a local pool to run the video streaming tasks, since they are !Send due to FFMPEG.
     // Currently, it's not expected to have more than one client, so one worker is enough.
@@ -68,9 +70,13 @@ async fn async_main() {
     task_tracker.spawn(input_mapper.run(cancel_token.child_token()));
 
     info!("Server started, waiting for connections");
-    while let Some(connection) = tcp_stream.next().await {
+    while let Some(connection) = tcp_stream
+        .next()
+        .with_cancellation_token(&cancel_token)
+        .await
+    {
         match connection {
-            Ok(connection) => {
+            Some(Ok(connection)) => {
                 task_tracker.spawn(handle_connection(
                     connection,
                     Arc::clone(&udp_socket),
@@ -80,9 +86,14 @@ async fn async_main() {
                     cancel_token.child_token(),
                 ));
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 error!("New connection error: {e}");
                 continue;
+            }
+            None => {
+                // This can only happen if the cancellation token is triggered
+                // by a shutdown signal, so we can just exit the loop and shut down the server.
+                break;
             }
         }
     }
@@ -92,4 +103,14 @@ async fn async_main() {
     cancel_token.cancel();
     task_tracker.wait().await;
     info!("Server shut down");
+}
+
+/// If a Ctrl-C is received, cancel the token to shut down the server.
+async fn handle_signals(cancel_token: CancellationToken) {
+    tokio::signal::ctrl_c()
+        .await
+        .expect("Failed to listen for Ctrl-C");
+
+    warn!("Ctrl-C received, shutting down server");
+    cancel_token.cancel();
 }
