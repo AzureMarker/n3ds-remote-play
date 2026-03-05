@@ -4,7 +4,7 @@ use crate::virtual_device::{VirtualDevice, VirtualDeviceFactory};
 use anyhow::Context;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::{TcpStream, UdpSocket};
 use tokio::select;
 use tokio_util::sync::CancellationToken;
@@ -84,7 +84,7 @@ async fn handle_connection_impl(
     // Handle input events in the main task.
     // If the client stops sending input events, we will close the connection.
     let mut joined_video_stream_task = false;
-    let mut read_buffer = [0];
+    let mut tcp_buffer = [0];
     loop {
         select! {
             biased;
@@ -106,11 +106,12 @@ async fn handle_connection_impl(
             }
 
             // Close the connection if the client disconnects
-            read_result = tcp_stream.read(&mut read_buffer) => {
+            read_result = tcp_stream.peek(&mut tcp_buffer) => {
                 match read_result {
                     Ok(0) => info!("Client closed the connection"),
                     Ok(_) => error!("Received data from client over TCP, which is unexpected"),
-                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof =>
+                    Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof ||
+                            e.kind() == std::io::ErrorKind::ConnectionReset =>
                         info!("Client closed the connection"),
                     Err(e) => error!("Failed to read from TCP stream: {e}"),
                 }

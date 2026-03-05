@@ -30,7 +30,7 @@ impl<'gfx> RemotePlayClient<'gfx> {
 
     pub fn run(mut self, server_ip: Ipv4Addr, hid: Hid, ir_user: IrUser) {
         // Set up connections
-        let (_tcp_connection, udp_socket) = Self::setup_networking(server_ip);
+        let (tcp_connection, udp_socket) = setup_networking(server_ip);
         log::info!("Connected to remote play server at {server_ip}");
 
         // Set up input handler and check for Circle Pad Pro
@@ -59,6 +59,13 @@ impl<'gfx> RemotePlayClient<'gfx> {
 
         // Main loop to send inputs and render video frames
         while self.apt.main_loop() {
+            // Check if the TCP connection was closed. If so, shut down the client.
+            if is_tcp_disconnected(&tcp_connection) {
+                log::warn!("Connection closed by server, shutting down client");
+                break;
+            }
+
+            // Scan inputs and send to the server
             if let Err(e) = input_handler.send_inputs_to_server() {
                 // This could be an error or just the user choosing to exit
                 log::info!("Exiting main loop: {e:#}");
@@ -81,26 +88,6 @@ impl<'gfx> RemotePlayClient<'gfx> {
             );
         }
         log::debug!("System thread shut down, exiting client");
-    }
-
-    /// Set up TCP and UDP connections to the server.
-    fn setup_networking(server_ip: Ipv4Addr) -> (TcpStream, UdpSocket) {
-        let tcp_connection =
-            TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
-
-        let udp_socket = UdpSocket::bind(tcp_connection.local_addr().unwrap())
-            .expect("Failed to listen for UDP connections");
-
-        // Configure the UDP socket
-        set_udp_recv_buffer_size(&udp_socket, 64 * 1024);
-        udp_socket
-            .connect((server_ip, 3535))
-            .expect("Failed to set up UDP connection to server");
-        udp_socket
-            .set_nonblocking(true)
-            .expect("Failed to set UDP socket to non-blocking mode");
-
-        (tcp_connection, udp_socket)
     }
 
     /// Check for an MPEG packet from the system thread, decode it, and display the frame.
@@ -163,6 +150,44 @@ impl<'gfx> RemotePlayClient<'gfx> {
             frame_decode_start.elapsed().as_millis()
         );
         log::debug!("");
+    }
+}
+
+/// Set up TCP and UDP connections to the server.
+fn setup_networking(server_ip: Ipv4Addr) -> (TcpStream, UdpSocket) {
+    // Connect to the server over TCP to establish the connection.
+    let tcp_connection =
+        TcpStream::connect((server_ip, 3535)).expect("Failed to connect to server");
+    tcp_connection
+        .set_nonblocking(true)
+        .expect("Failed to set TCP stream to non-blocking");
+
+    // Set up a UDP socket for the data streams
+    let udp_socket = UdpSocket::bind(tcp_connection.local_addr().unwrap())
+        .expect("Failed to listen for UDP connections");
+
+    set_udp_recv_buffer_size(&udp_socket, 64 * 1024);
+    udp_socket
+        .connect((server_ip, 3535))
+        .expect("Failed to set up UDP connection to server");
+    udp_socket
+        .set_nonblocking(true)
+        .expect("Failed to set UDP socket to non-blocking mode");
+
+    (tcp_connection, udp_socket)
+}
+
+/// Check if the TCP connection has been closed by the server.
+fn is_tcp_disconnected(tcp_connection: &TcpStream) -> bool {
+    // Check if the TCP connection is still alive by peeking with a one byte buffer.
+    // If recv returns 0, the connection has been closed by the server.
+    let mut buf = [0];
+    match tcp_connection.peek(&mut buf) {
+        Ok(0) => true,  // Connection closed
+        Ok(_) => false, // Data available, connection alive
+        // No data but still connected
+        Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => false,
+        Err(_) => true, // Other errors treated as disconnection
     }
 }
 
