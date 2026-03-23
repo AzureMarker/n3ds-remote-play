@@ -23,8 +23,7 @@ struct RtpMpegPacketState {
     /// Total bytes written into `buf` for the current MPEG packet.
     received_bytes: usize,
     /// Byte ranges written so far, indexed by `frag_index`.
-    ///
-    /// This provides a much cheaper overlap check vs tracking every byte.
+    /// This provides a much cheaper overlap check versus tracking every byte.
     fragment_ranges: Vec<Option<(usize, usize)>>,
     start_time: Instant,
 }
@@ -52,13 +51,14 @@ impl RtpMpegPacketState {
 /// - mpeg_len (u32 BE)
 /// - frag_index (u16 BE)
 /// - frag_count (u16 BE)
-/// - frag_offset (u32 BE)  byte offset into the MPEG packet
+/// - frag_offset (u32 BE) byte offset into the MPEG packet
 ///
 /// `frag_offset` makes out-of-order reassembly unambiguous.
 #[derive(Default)]
 pub struct RtpMpegPacketDecoder {
     in_flight: BTreeMap<u16, RtpMpegPacketState>,
     latest_seq: u16,
+    latest_completed_seq: Option<u16>,
 }
 
 impl RtpMpegPacketDecoder {
@@ -66,20 +66,33 @@ impl RtpMpegPacketDecoder {
         Self::default()
     }
 
-    fn evict_old_packets(&mut self, seq: u16) {
-        let in_flight_keys: Vec<u16> = self.in_flight.keys().copied().collect();
-        for in_flight_seq in in_flight_keys {
-            if in_flight_seq + IN_FLIGHT_WINDOW as u16 <= seq {
+    // Removes in-flight packets that are too old (not within `IN_FLIGHT_WINDOW` of `latest_seq`).
+    fn evict_old_packets(&mut self) {
+        self.in_flight.retain(|&in_flight_seq, _| {
+            let keep = in_flight_seq + IN_FLIGHT_WINDOW as u16 > self.latest_seq;
+            if !keep {
                 log::warn!(
-                    "Evicting in-flight seq {} as it's too old compared to {}",
-                    in_flight_seq,
-                    seq
+                    "Evicting in-flight seq {in_flight_seq} as it's too old compared to {}",
+                    self.latest_seq
                 );
-                self.in_flight.remove(&in_flight_seq);
             }
-        }
+            keep
+        });
+    }
 
-        self.latest_seq = std::cmp::max(self.latest_seq, seq);
+    // Removes in-flight packets that are older than `completed_seq`.
+    fn drop_older_packets_after_completion(&mut self, completed_seq: u16) {
+        self.in_flight.retain(|&in_flight_seq, _| {
+            let keep = in_flight_seq >= completed_seq;
+            if !keep {
+                log::warn!(
+                    "Dropping in-flight seq {in_flight_seq} because newer seq {completed_seq} already completed",
+                );
+            }
+            keep
+        });
+
+        self.latest_completed_seq = Some(completed_seq);
     }
 }
 
@@ -98,10 +111,7 @@ impl Decoder for RtpMpegPacketDecoder {
         let packet = RtpPacket::parse(&datagram)?;
 
         if packet.payload_type() != RTP_MPEG_PAYLOAD_TYPE {
-            log::warn!(
-                "Ignoring RTP packet with unexpected payload type: {}",
-                packet.payload_type()
-            );
+            log::warn!("RTP unexpected payload type: {}", packet.payload_type());
             return Ok(None);
         }
 
@@ -109,10 +119,16 @@ impl Decoder for RtpMpegPacketDecoder {
         // All fragments of a given MPEG packet use the same sequence number.
         let seq = packet.sequence_number();
 
+        if let Some(latest_completed_seq) = self.latest_completed_seq
+            && seq <= latest_completed_seq
+        {
+            log::warn!("RTP #{seq} is <= already completed #{latest_completed_seq}, ignoring");
+            return Ok(None);
+        }
+
         if seq + IN_FLIGHT_WINDOW as u16 <= self.latest_seq {
             log::warn!(
-                "Ignoring RTP packet with old sequence number: {}, latest is {}",
-                seq,
+                "RTP #{seq} is too old compared to {}, dropping",
                 self.latest_seq
             );
             return Ok(None);
@@ -120,7 +136,7 @@ impl Decoder for RtpMpegPacketDecoder {
 
         let mut payload = packet.payload();
         if payload.len() < 12 {
-            // Not enough for fragment header; drop.
+            // Not enough for the fragment header
             log::warn!("RTP packet payload too short for MPEG fragment header; dropping");
             return Ok(None);
         }
@@ -132,57 +148,50 @@ impl Decoder for RtpMpegPacketDecoder {
         let frag_offset = payload.get_u32() as usize;
         let frag_bytes = payload;
 
+        if frag_bytes.is_empty() {
+            log::warn!("RTP packet has empty fragment payload; dropping");
+            return Ok(None);
+        }
         if frag_count == 0 {
             log::warn!("RTP packet has frag_count == 0; dropping");
             return Ok(None);
         }
         if frag_index >= frag_count {
             log::warn!(
-                "RTP packet has invalid frag_index {} >= frag_count {}; dropping",
-                frag_index,
-                frag_count
+                "RTP packet has invalid frag_index {frag_index} >= frag_count {frag_count}; dropping",
             );
             return Ok(None);
         }
 
-        // Get or create in-flight state for this MPEG packet id.
+        // Get or create the in-flight state for this MPEG packet id.
         self.in_flight.entry(seq).or_insert_with(|| {
             RtpMpegPacketState::new_for_packet(total_len, frag_count, start_time)
         });
-        self.evict_old_packets(seq);
+        if seq > self.latest_seq {
+            self.latest_seq = seq;
+            self.evict_old_packets();
+        }
 
         let state = self.in_flight.get_mut(&seq).expect("state must exist");
 
         // If parameters change for an existing seq, drop that packet.
         if state.frag_count != frag_count || state.total_len != total_len {
             log::warn!(
-                "Dropping MPEG packet seq {} due to header mismatch: existing total_len {} frag_count {}, got total_len {} frag_count {}",
-                seq,
+                "RTP #{seq} header mismatch: existing total_len {} frag_count {}, \
+                 got total_len {total_len} frag_count {frag_count}",
                 state.total_len,
                 state.frag_count,
-                total_len,
-                frag_count
             );
             self.in_flight.remove(&seq);
             return Ok(None);
         }
 
-        // Bounds check for declared offset.
-        if frag_offset >= state.total_len {
-            log::warn!(
-                "RTP fragment offset {} is out of bounds (total_len {}); dropping current MPEG packet",
-                frag_offset,
-                state.total_len
-            );
-            self.in_flight.remove(&seq);
-            return Ok(None);
-        }
+        // Check that the fragment is within the bounds of the MPEG packet.
         if frag_offset.saturating_add(frag_bytes.len()) > state.total_len {
             log::warn!(
-                "RTP fragment (offset {}, len {}) exceeds total_len {}; dropping current MPEG packet",
-                frag_offset,
-                frag_bytes.len(),
-                state.total_len
+                "RTP fragment (offset {frag_offset}, len {len}) exceeds total_len {total_len}; dropping current MPEG packet",
+                len = frag_bytes.len(),
+                total_len = state.total_len,
             );
             self.in_flight.remove(&seq);
             return Ok(None);
@@ -191,9 +200,7 @@ impl Decoder for RtpMpegPacketDecoder {
         // Ignore duplicates but keep the current packet state.
         if state.frag_received[frag_index as usize] {
             log::warn!(
-                "Duplicate fragment ignored for MPEG packet seq {} (frag_index {})",
-                seq,
-                frag_index
+                "Duplicate fragment ignored for MPEG packet seq {seq} (frag_index {frag_index})",
             );
             return Ok(None);
         }
@@ -203,7 +210,7 @@ impl Decoder for RtpMpegPacketDecoder {
         let end = frag_offset + frag_bytes.len();
 
         // Detect overlap/double-write by comparing this fragment's byte range with
-        // all previously-seen fragment ranges.
+        // all previously seen fragment ranges.
         //
         // This protects against corrupted headers / sender bugs.
         for range in &state.fragment_ranges {
@@ -214,11 +221,9 @@ impl Decoder for RtpMpegPacketDecoder {
             // Half-open interval overlap check: [start, end) overlaps [r_start, r_end)
             if start < *r_end && *r_start < end {
                 log::warn!(
-                    "Dropping MPEG packet seq {} due to overlapping fragment (frag_index {} offset {} len {})",
-                    seq,
-                    frag_index,
-                    frag_offset,
-                    frag_bytes.len(),
+                    "Dropping MPEG packet seq {seq} due to overlapping fragment \
+                     (frag_index {frag_index} offset {frag_offset} len {len})",
+                    len = frag_bytes.len(),
                 );
                 self.in_flight.remove(&seq);
                 return Ok(None);
@@ -233,8 +238,7 @@ impl Decoder for RtpMpegPacketDecoder {
 
         // Finished accepting this fragment
         log::trace!(
-            "Rx #{} {}/{} (l={}) {:?}",
-            seq,
+            "Rx #{seq} {}/{} (l={}) {:?}",
             frag_index + 1,
             frag_count,
             frag_bytes.len(),
@@ -247,11 +251,10 @@ impl Decoder for RtpMpegPacketDecoder {
             return Ok(None);
         }
 
-        // Double check that we received all bytes
+        // Double-check that we received all bytes
         if state.received_bytes != state.total_len {
             log::warn!(
-                "Dropping MPEG packet seq {}: completed fragment set but received_bytes {} != total_len {}",
-                seq,
+                "Dropping MPEG packet seq {seq}: completed fragment set but received_bytes {} != total_len {}",
                 state.received_bytes,
                 state.total_len
             );
@@ -259,12 +262,13 @@ impl Decoder for RtpMpegPacketDecoder {
             return Ok(None);
         }
 
-        // Packet is complete. Remove from in-flight list and return the assembled buffer.
+        // Packet is complete. Remove from the in-flight list and return the assembled buffer.
         let mut completed = self.in_flight.remove(&seq).expect("exists");
+        self.drop_older_packets_after_completion(seq);
         let out = completed.buf.split_to(completed.total_len);
         let duration = completed.start_time.elapsed();
 
-        log::debug!("Rx #{} COMPLETE in {:?}", seq, duration);
+        log::debug!("Rx #{seq} COMPLETE in {duration:?}");
 
         Ok(Some((out, duration)))
     }
@@ -445,13 +449,13 @@ mod tests {
         let mut d0_dup = d0.clone();
         let mut d1 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 1, full.len() as u32, 1, 2, 10, f1);
 
-        // First fragment will not result in output
+        // The first fragment will not result in output
         assert_eq!(decoder.decode(&mut d0).unwrap(), None);
 
         // Duplicate fragment should be ignored
         assert_eq!(decoder.decode(&mut d0_dup).unwrap(), None);
 
-        // Second fragment should complete the packet
+        // The second fragment should complete the packet
         let (out, _) = decoder.decode(&mut d1).unwrap().expect("expected output");
         assert_eq!(out.as_ref(), full);
     }
@@ -467,7 +471,7 @@ mod tests {
         let mut d0 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 10, full.len() as u32, 0, 2, 0, f0);
         assert!(decoder.decode(&mut d0).unwrap().is_none());
 
-        // Overlap: frag_index is 1 but the offset overlaps the first fragment
+        // Overlap: frag_index is 1, but the offset overlaps the first fragment
         let mut overlap =
             build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 10, full.len() as u32, 1, 2, 5, f1);
         assert!(decoder.decode(&mut overlap).unwrap().is_none());
@@ -494,7 +498,7 @@ mod tests {
     }
 
     #[test]
-    fn out_of_order_across_packet_boundary_is_ok() {
+    fn completing_newer_packet_drops_older_in_flight_packet() {
         let mut decoder = RtpMpegPacketDecoder::new();
 
         // Packet A (seq=10): 2 fragments
@@ -510,19 +514,14 @@ mod tests {
             build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 10, a.len() as u32, 0, 2, 0, a0);
         assert!(decoder.decode(&mut a_frag0).unwrap().is_none());
 
-        // Then receive full packet B
-        // FIXME: This should not return the packet until we've either completed or given up on A.
+        // Then receive full packet B. Completing it should drop older incomplete packets.
         let mut b0 = build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 11, b.len() as u32, 0, 1, 0, b);
         let (out_b, _) = decoder.decode(&mut b0).unwrap().expect("expected packet B");
         assert_eq!(&out_b[..], b);
 
-        // Then receive the last fragment of A
+        // Then receive the last fragment of A; it should be ignored because seq 11 already completed.
         let mut a_frag1 =
             build_rtp_datagram(RTP_MPEG_PAYLOAD_TYPE, 10, a.len() as u32, 1, 2, 8, a1);
-        let (out_a, _) = decoder
-            .decode(&mut a_frag1)
-            .unwrap()
-            .expect("expected packet A");
-        assert_eq!(&out_a[..], a);
+        assert!(decoder.decode(&mut a_frag1).unwrap().is_none());
     }
 }
