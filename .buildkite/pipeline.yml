@@ -1,0 +1,40 @@
+common:
+  docker-rust: &docker-rust
+    docker:
+      image: "rust:1.94"
+
+steps:
+  - label: "Lint server"
+    commands:
+      - rustup component add clippy
+      - cargo clippy -p n3ds-remote-play-server
+    plugins:
+      - *docker-rust
+
+  - label: "Lint client"
+    commands:
+      - ./.buildkite/install-3ds-tools.sh
+      - rustup component add clippy
+      - cargo 3ds clippy -p n3ds-remote-play-client
+    plugins:
+      - *docker-rust
+
+  - label: "Test (common package)"
+    command: cargo test -p n3ds-remote-play-common
+    plugins:
+      - *docker-rust
+
+  - label: "Build (server)"
+    commands:
+      - cargo build -p n3ds-remote-play-server --release
+    artifact_paths: "target/release/n3ds-remote-play-server*"
+    plugins:
+      - *docker-rust
+
+  - label: "Build (client)"
+    commands:
+      - ./.buildkite/install-3ds-tools.sh
+      - cargo 3ds build -p n3ds-remote-play-client --release
+    artifact_paths: "target/armv6k-nintendo-3ds/release/n3ds-remote-play-client*"
+    plugins:
+      - *docker-rust
