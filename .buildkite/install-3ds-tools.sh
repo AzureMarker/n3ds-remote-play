@@ -13,7 +13,7 @@ apt-get update
 apt-get install -y build-essential devkitpro-pacman
 
 # Install DevKitPro 3DS tools
-sudo dkp-pacman -S 3ds-dev
+dkp-pacman -S 3ds-dev
 
 # Install cargo-3ds
 cargo install --locked cargo-3ds

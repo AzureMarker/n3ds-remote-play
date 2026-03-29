@@ -6,6 +6,7 @@ common:
 steps:
   - label: "Lint server"
     commands:
+      - ./.buildkite/install-server-dependencies.sh
       - rustup component add clippy
       - rm -r .cargo # Remove the cargo config to prevent it from trying to build std (only needed for 3DS builds)
       - cargo clippy -p n3ds-remote-play-server
@@ -29,6 +30,7 @@ steps:
 
   - label: "Build (server)"
     commands:
+      - ./.buildkite/install-server-dependencies.sh
       - rm -r .cargo # Remove the cargo config to prevent it from trying to build std (only needed for 3DS builds)
       - cargo build -p n3ds-remote-play-server --release
     artifact_paths: "target/release/n3ds-remote-play-server*"
