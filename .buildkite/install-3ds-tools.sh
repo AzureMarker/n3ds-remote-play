@@ -9,7 +9,7 @@ echo "deb [signed-by=/usr/share/keyring/devkitpro-pub.gpg] https://apt.devkitpro
   > /etc/apt/sources.list.d/devkitpro.list
 
 apt-get update
-apt-get install -y build-essential devkitpro-pacman
+apt-get install -y build-essential clang devkitpro-pacman
 
 # Install DevKitPro 3DS tools
 dkp-pacman -S --noconfirm 3ds-dev
