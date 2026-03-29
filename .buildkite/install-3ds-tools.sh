@@ -15,6 +15,7 @@ apt-get install -y build-essential clang devkitpro-pacman
 dkp-pacman -S --noconfirm 3ds-dev
 export DEVKITPRO=/opt/devkitpro
 export DEVKITARM=/opt/devkitpro/devkitARM
+export PATH="$PATH:$DEVKITPRO/tools/bin:$DEVKITARM/bin"
 
 # Install cargo-3ds
 cargo install --locked cargo-3ds
