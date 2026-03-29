@@ -1,6 +1,5 @@
 #!/bin/bash
 # Install the tools needed to compile on the 3DS
-
 set -eu pipefail
 
 # Set up DevKitPro pacman
@@ -14,8 +13,8 @@ apt-get install -y build-essential devkitpro-pacman
 
 # Install DevKitPro 3DS tools
 dkp-pacman -S --noconfirm 3ds-dev
-buildkite-agent env set DEVKITPRO=/opt/devkitpro
-buildkite-agent env set DEVKITARM=/opt/devkitpro/devkitARM
+export DEVKITPRO=/opt/devkitpro
+export DEVKITARM=/opt/devkitpro/devkitARM
 
 # Install cargo-3ds
 cargo install --locked cargo-3ds

@@ -2,7 +2,6 @@ common:
   docker-rust: &docker-rust
     docker:
       image: "rust:1.94"
-      mount-buildkite-agent: true
 
 steps:
   - label: "Lint server"
