@@ -4,4 +4,4 @@
 apt-get update
 apt-get install -y pkg-config libclang-dev libxcb1-dev libxrandr-dev \
   libdbus-1-dev libpipewire-0.3-dev libwayland-dev libegl-dev \
-  clang libavcodec-dev libavformat-dev libavutil-dev
+  clang libavcodec-dev libavformat-dev libavutil-dev libavfilter-dev

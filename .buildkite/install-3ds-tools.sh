@@ -14,8 +14,8 @@ apt-get install -y build-essential devkitpro-pacman
 
 # Install DevKitPro 3DS tools
 dkp-pacman -S --noconfirm 3ds-dev
-export DEVKITPRO=/opt/devkitpro
-export DEVKITARM=$DEVKITPRO/devkitARM
+buildkite-agent env set DEVKITPRO=/opt/devkitpro
+buildkite-agent env set DEVKITARM=/opt/devkitpro/devkitARM
 
 # Install cargo-3ds
 cargo install --locked cargo-3ds
