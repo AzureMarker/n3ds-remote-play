@@ -6,5 +6,8 @@
 build-std = ["std", "test"]
 
 [env]
-PKG_CONFIG_SYSROOT_DIR_armv6k-nintendo-3ds="/opt/devkitpro/devkitARM/arm-none-eabi"
-CC_armv6k-nintendo-3ds="/opt/devkitpro/devkitARM/bin/arm-none-eabi-gcc"
+PKG_CONFIG_SYSROOT_DIR_armv6k-nintendo-3ds = "/opt/devkitpro/devkitARM/arm-none-eabi"
+CC_armv6k-nintendo-3ds = "/opt/devkitpro/devkitARM/bin/arm-none-eabi-gcc"
+
+[target.armv6k-nintendo-3ds]
+linker = "/opt/devkitpro/devkitARM/bin/arm-none-eabi-gcc"
