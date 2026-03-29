@@ -18,3 +18,6 @@ export DEVKITARM=/opt/devkitpro/devkitARM
 
 # Install cargo-3ds
 cargo install --locked cargo-3ds
+
+# Download Rust standard library sources (needed for build-std)
+rustup component add rust-src
