@@ -7,6 +7,7 @@ steps:
   - label: "Lint server"
     commands:
       - rustup component add clippy
+      - rm -r .cargo # Remove the cargo config to prevent it from trying to build std (only needed for 3DS builds)
       - cargo clippy -p n3ds-remote-play-server
     plugins:
       - *docker-rust
@@ -20,12 +21,15 @@ steps:
       - *docker-rust
 
   - label: "Test (common package)"
-    command: cargo test -p n3ds-remote-play-common
+    commands:
+      - rm -r .cargo # Remove the cargo config to prevent it from trying to build std (only needed for 3DS builds)
+      - cargo test -p n3ds-remote-play-common
     plugins:
       - *docker-rust
 
   - label: "Build (server)"
     commands:
+      - rm -r .cargo # Remove the cargo config to prevent it from trying to build std (only needed for 3DS builds)
       - cargo build -p n3ds-remote-play-server --release
     artifact_paths: "target/release/n3ds-remote-play-server*"
     plugins:
